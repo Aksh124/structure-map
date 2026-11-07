@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "structuremap",
+	"version": "${version}",
+	"name": "Structure Map",
+	"description": "Finds structures and biomes from the world seed, using vanilla world generation on the client.",
+	"authors": ["Akshay"],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["structuremap.StructureMapClient"],
+		"seedcracker:seed_found": ["structuremap.SeedCrackerBridge"]
+	},
+	"depends": {
+		"fabricloader": ">=0.20.0",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"seedcracker": "*"
+	}
+}

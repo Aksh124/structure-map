@@ -1,0 +1,14 @@
+{
+	"schemaVersion": 1,
+	"id": "structuremap-gametest",
+	"version": "1.0.0",
+	"name": "Structure Map game tests",
+	"environment": "client",
+	"entrypoints": {
+		"fabric-client-gametest": ["structuremap.test.StructureMapGameTest"]
+	},
+	"depends": {
+		"structuremap": "*",
+		"seedcracker": ">=1.1.0"
+	}
+}
