@@ -5,6 +5,7 @@ import static net.fabricmc.fabric.api.client.command.v2.ClientCommands.literal;
 
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
@@ -28,6 +29,7 @@ import java.util.function.Predicate;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.ChatFormatting;
@@ -40,6 +42,7 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -72,9 +75,29 @@ public final class StructureMapClient implements ClientModInitializer {
 	private static volatile Long seed;
 	private static volatile String seedSource;
 
+	/** Most waypoints one command adds. */
+	static final int MAX_WAYPOINTS = 50;
+
+	private static int ticks;
+
 	@Override
 	public void onInitializeClient() {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, context) -> registerCommands(dispatcher));
+		if (Waypoints.available()) {
+			// Xaero's slime chunk overlay needs the seed, and the Minimap world can change at any time.
+			ClientTickEvents.END_CLIENT_TICK.register(client -> {
+				Long current = seed;
+				if (current != null && client.player != null && ++ticks % 100 == 0) {
+					try {
+						if (Waypoints.shareSlimeChunkSeed(current)) {
+							LOGGER.info("Gave Xaero's Minimap the seed for its slime chunk overlay");
+						}
+					} catch (RuntimeException e) {
+						LOGGER.warn("Couldn't give Xaero's Minimap the seed", e);
+					}
+				}
+			});
+		}
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> client.execute(StructureMapClient::onJoin));
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
 			seed = null;
@@ -164,6 +187,27 @@ public final class StructureMapClient implements ClientModInitializer {
 		}, WORKER);
 	}
 
+	/** The nearest {@code count} structures (an id, or a #tag), closest first. Completes off the client thread. */
+	public static CompletableFuture<List<Found>> locateStructures(String name, ResourceKey<Level> dimension, BlockPos origin, int count) {
+		Long forSeed = seed;
+		if (forSeed == null) {
+			return CompletableFuture.failedFuture(new IllegalStateException(noSeedMessage()));
+		}
+		return data().thenApplyAsync(loaded -> {
+			Registry<Structure> registry = loaded.registries().lookupOrThrow(Registries.STRUCTURE);
+			HolderSet<Structure> targets = resolve(registry, name);
+			Generator gen = generatorFor(loaded, forSeed, dimension);
+			if (gen == null) {
+				throw new IllegalStateException("This dimension isn't part of the default world preset.");
+			}
+			List<Found> found = new ArrayList<>();
+			for (Pair<BlockPos, Holder<Structure>> result : Locator.nearestStructures(loaded, gen, targets, origin, count)) {
+				found.add(new Found(result.getFirst(), result.getSecond().unwrapKey().map(ResourceKey::identifier).orElse(null)));
+			}
+			return found;
+		}, WORKER);
+	}
+
 	/** Nearest biome (an id, or a #tag) to the origin, searched in 3D like /locate biome. */
 	public static CompletableFuture<Found> locateBiome(String name, ResourceKey<Level> dimension, BlockPos origin) {
 		Long forSeed = seed;
@@ -205,9 +249,27 @@ public final class StructureMapClient implements ClientModInitializer {
 		dispatcher.register(literal("structurelocate")
 			.executes(context -> {
 				context.getSource().sendFeedback(Component.literal(
-					"/structurelocate structure <id or #tag>, /structurelocate biome <id or #tag>, /structurelocate seed [value]"));
+					"/structurelocate structure <id or #tag>, /structurelocate biome <id or #tag>, /structurelocate seed [value]"
+						+ (Waypoints.available() ? ", /structurelocate waypoints <count> <id or #tag>, /structurelocate waypoints clear" : "")));
 				return Command.SINGLE_SUCCESS;
 			})
+			.then(literal("waypoints")
+				.then(literal("clear").executes(context -> clearWaypoints(context.getSource())))
+				.then(literal("add")
+					.then(literal("structure").then(argument("x", IntegerArgumentType.integer())
+						.then(argument("z", IntegerArgumentType.integer()).then(argument("id", StringArgumentType.greedyString())
+							.executes(context -> addWaypoint(context.getSource(), StringArgumentType.getString(context, "id"),
+								new BlockPos(IntegerArgumentType.getInteger(context, "x"), 0, IntegerArgumentType.getInteger(context, "z")), false))))))
+					.then(literal("biome").then(argument("x", IntegerArgumentType.integer()).then(argument("y", IntegerArgumentType.integer())
+						.then(argument("z", IntegerArgumentType.integer()).then(argument("id", StringArgumentType.greedyString())
+							.executes(context -> addWaypoint(context.getSource(), StringArgumentType.getString(context, "id"),
+								new BlockPos(IntegerArgumentType.getInteger(context, "x"), IntegerArgumentType.getInteger(context, "y"),
+									IntegerArgumentType.getInteger(context, "z")), true))))))))
+				.then(argument("count", IntegerArgumentType.integer(1, MAX_WAYPOINTS))
+					.then(argument("structure", StringArgumentType.greedyString())
+						.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
+						.executes(context -> addNearestWaypoints(context.getSource(), StringArgumentType.getString(context, "structure"),
+							IntegerArgumentType.getInteger(context, "count"))))))
 			.then(literal("structure").then(argument("structure", StringArgumentType.greedyString())
 				.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
 				.executes(context -> search(context.getSource(), StringArgumentType.getString(context, "structure"), false))))
@@ -269,9 +331,103 @@ public final class StructureMapClient implements ClientModInitializer {
 				? origin.distSqr(pos)
 				: Math.pow(origin.getX() - pos.getX(), 2) + Math.pow(origin.getZ() - pos.getZ(), 2)));
 			String coords = biome ? pos.getX() + " " + pos.getY() + " " + pos.getZ() : pos.getX() + " ~ " + pos.getZ();
-			message(Component.literal("Nearest " + found.id() + ": ").append(copyable(coords))
-				.append(String.format(Locale.ROOT, " (%d blocks away, %.1fs)", distance, (System.nanoTime() - started) / 1e9)));
+			MutableComponent line = Component.literal("Nearest " + found.id() + ": ").append(copyable(coords))
+				.append(String.format(Locale.ROOT, " (%d blocks away, %.1fs)", distance, (System.nanoTime() - started) / 1e9));
+			if (Waypoints.available() && found.id() != null) {
+				String command = biome
+					? "/structurelocate waypoints add biome " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + " " + found.id()
+					: "/structurelocate waypoints add structure " + pos.getX() + " " + pos.getZ() + " " + found.id();
+				line.append(" ").append(Component.literal("[+ Waypoint]").withStyle(style -> style
+					.withColor(ChatFormatting.YELLOW)
+					.withClickEvent(new ClickEvent.RunCommand(command))
+					.withHoverEvent(new HoverEvent.ShowText(Component.literal("Add a waypoint in Xaero's Minimap")))));
+			}
+			message(line);
 		}));
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int addWaypoint(FabricClientCommandSource source, String id, BlockPos pos, boolean biome) {
+		if (!Waypoints.available()) {
+			source.sendError(Component.literal("Xaero's Minimap isn't installed."));
+			return 0;
+		}
+		Identifier parsed = Identifier.tryParse(id.trim());
+		if (parsed == null) {
+			source.sendError(Component.literal("Not a valid id: " + id));
+			return 0;
+		}
+		Waypoints.Mark mark = biome ? Waypoints.forBiome(parsed, pos) : Waypoints.forStructure(parsed, pos);
+		try {
+			List<Waypoints.Mark> added = Waypoints.add(List.of(mark));
+			message(Component.literal(added.isEmpty()
+				? "There's already a " + mark.name() + " waypoint there."
+				: "Added a " + mark.name() + " waypoint at " + pos.getX() + (biome ? " " + pos.getY() + " " : " ~ ") + pos.getZ() + "."));
+		} catch (RuntimeException e) {
+			source.sendError(Component.literal(e.getMessage()));
+			return 0;
+		}
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int addNearestWaypoints(FabricClientCommandSource source, String name, int count) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player == null || mc.level == null) {
+			return 0;
+		}
+		if (!Waypoints.available()) {
+			source.sendError(Component.literal("Xaero's Minimap isn't installed."));
+			return 0;
+		}
+		if (seed == null) {
+			source.sendError(Component.literal(noSeedMessage()));
+			return 0;
+		}
+		BlockPos origin = mc.player.blockPosition();
+		source.sendFeedback(Component.literal("Searching for the nearest " + count + " " + name + "...").withStyle(ChatFormatting.GRAY));
+		long started = System.nanoTime();
+		locateStructures(name, mc.level.dimension(), origin, count).whenComplete((found, error) -> mc.execute(() -> {
+			if (error != null) {
+				Throwable cause = error.getCause() != null ? error.getCause() : error;
+				message(Component.literal(cause.getMessage()).withStyle(ChatFormatting.RED));
+				return;
+			}
+			if (found.isEmpty()) {
+				message(Component.literal("No " + name + " found within range."));
+				return;
+			}
+			List<Waypoints.Mark> marks = new ArrayList<>();
+			for (Found each : found) {
+				if (each.id() != null) {
+					marks.add(Waypoints.forStructure(each.id(), each.pos()));
+				}
+			}
+			try {
+				int added = Waypoints.add(marks).size();
+				int furthest = (int) Math.round(Math.sqrt(Locator.horizontalDistanceSqr(origin, found.getLast().pos())));
+				message(Component.literal(String.format(Locale.ROOT, "Added %d waypoint%s for %d %s within %d blocks%s (%.1fs).",
+					added, added == 1 ? "" : "s", found.size(), name, furthest,
+					added < found.size() ? ", " + (found.size() - added) + " already there" : "",
+					(System.nanoTime() - started) / 1e9)));
+			} catch (RuntimeException e) {
+				message(Component.literal(e.getMessage()).withStyle(ChatFormatting.RED));
+			}
+		}));
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int clearWaypoints(FabricClientCommandSource source) {
+		if (!Waypoints.available()) {
+			source.sendError(Component.literal("Xaero's Minimap isn't installed."));
+			return 0;
+		}
+		try {
+			int removed = Waypoints.clear();
+			source.sendFeedback(Component.literal("Removed " + removed + " Structure Map waypoint" + (removed == 1 ? "" : "s") + " from this world."));
+		} catch (RuntimeException e) {
+			source.sendError(Component.literal(e.getMessage()));
+			return 0;
+		}
 		return Command.SINGLE_SUCCESS;
 	}
 

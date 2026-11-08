@@ -103,6 +103,118 @@ final class Locator {
 		return best;
 	}
 
+	/**
+	 * The nearest {@code count} structures by horizontal distance, closest first.
+	 *
+	 * <p>Spread regions are checked ring by ring, like {@link #nearestStructure}, but every start in
+	 * a ring is kept. Starts in ring r+1 are at least r spacings away, so the search stops once that
+	 * is further than the count-th result.
+	 */
+	static List<Pair<BlockPos, Holder<Structure>>> nearestStructures(Data data, Generator generator, HolderSet<Structure> targets,
+		BlockPos origin, int count) {
+		Map<StructurePlacement, Set<Holder<Structure>>> byPlacement = new LinkedHashMap<>();
+		for (Holder<Structure> target : targets) {
+			for (StructurePlacement placement : generator.structureState().getPlacementsForStructure(target)) {
+				byPlacement.computeIfAbsent(placement, p -> new LinkedHashSet<>()).add(target);
+			}
+		}
+
+		Map<BlockPos, Pair<BlockPos, Holder<Structure>>> found = new LinkedHashMap<>();
+		List<Map.Entry<StructurePlacement, Set<Holder<Structure>>>> spreads = new ArrayList<>();
+		for (Map.Entry<StructurePlacement, Set<Holder<Structure>>> entry : byPlacement.entrySet()) {
+			if (entry.getKey() instanceof ConcentricRingsStructurePlacement rings) {
+				List<ChunkPos> positions = generator.structureState().getRingPositionsFor(rings);
+				if (positions == null) {
+					continue;
+				}
+				List<ChunkPos> sorted = new ArrayList<>(positions);
+				sorted.sort(java.util.Comparator.comparingDouble(chunk -> horizontalDistanceSqr(origin, rings.getLocatePos(chunk))));
+				int kept = 0;
+				for (ChunkPos chunk : sorted) {
+					Pair<BlockPos, Holder<Structure>> start = structureAt(data, generator, entry.getValue(), rings, chunk);
+					if (start != null) {
+						found.putIfAbsent(start.getFirst(), start);
+						if (++kept >= count) {
+							break;
+						}
+					}
+				}
+			} else if (entry.getKey() instanceof RandomSpreadStructurePlacement) {
+				spreads.add(entry);
+			}
+		}
+
+		if (!spreads.isEmpty()) {
+			int chunkX = SectionPos.blockToSectionCoord(origin.getX());
+			int chunkZ = SectionPos.blockToSectionCoord(origin.getZ());
+			int minSpacing = Integer.MAX_VALUE;
+			for (Map.Entry<StructurePlacement, Set<Holder<Structure>>> entry : spreads) {
+				minSpacing = Math.min(minSpacing, ((RandomSpreadStructurePlacement) entry.getKey()).spacing());
+			}
+			for (int radius = 0; radius <= STRUCTURE_SEARCH_RADIUS; radius++) {
+				for (Map.Entry<StructurePlacement, Set<Holder<Structure>>> entry : spreads) {
+					RandomSpreadStructurePlacement placement = (RandomSpreadStructurePlacement) entry.getKey();
+					for (Pair<BlockPos, Holder<Structure>> start : allInSpreadRing(data, generator, entry.getValue(), chunkX, chunkZ, radius, placement)) {
+						found.putIfAbsent(start.getFirst(), start);
+					}
+				}
+				if (found.size() >= count) {
+					double kth = sortedByDistance(found.values(), origin).get(count - 1).getSecond();
+					double nextRingBlocks = (radius * (double) minSpacing - 1) * 16;
+					if (nextRingBlocks > 0 && nextRingBlocks * nextRingBlocks > kth) {
+						break;
+					}
+				}
+			}
+		}
+
+		List<Pair<BlockPos, Holder<Structure>>> result = new ArrayList<>();
+		for (Pair<Pair<BlockPos, Holder<Structure>>, Double> entry : sortedByDistance(found.values(), origin)) {
+			if (result.size() >= count) {
+				break;
+			}
+			result.add(entry.getFirst());
+		}
+		return result;
+	}
+
+	private static List<Pair<Pair<BlockPos, Holder<Structure>>, Double>> sortedByDistance(
+		java.util.Collection<Pair<BlockPos, Holder<Structure>>> starts, BlockPos origin) {
+		List<Pair<Pair<BlockPos, Holder<Structure>>, Double>> sorted = new ArrayList<>();
+		for (Pair<BlockPos, Holder<Structure>> start : starts) {
+			sorted.add(Pair.of(start, horizontalDistanceSqr(origin, start.getFirst())));
+		}
+		sorted.sort(java.util.Comparator.comparingDouble(Pair::getSecond));
+		return sorted;
+	}
+
+	static double horizontalDistanceSqr(BlockPos a, BlockPos b) {
+		double dx = a.getX() - b.getX();
+		double dz = a.getZ() - b.getZ();
+		return dx * dx + dz * dz;
+	}
+
+	/** Every target start in the square ring of regions at this radius. */
+	private static List<Pair<BlockPos, Holder<Structure>>> allInSpreadRing(Data data, Generator generator, Set<Holder<Structure>> targets,
+		int chunkX, int chunkZ, int radius, RandomSpreadStructurePlacement placement) {
+		List<Pair<BlockPos, Holder<Structure>>> starts = new ArrayList<>();
+		int spacing = placement.spacing();
+		for (int dx = -radius; dx <= radius; dx++) {
+			boolean edgeX = dx == -radius || dx == radius;
+			for (int dz = -radius; dz <= radius; dz++) {
+				if (!edgeX && dz != -radius && dz != radius) {
+					continue;
+				}
+				ChunkPos chunk = placement.getPotentialStructureChunk(generator.seed(), chunkX + spacing * dx, chunkZ + spacing * dz);
+				Pair<BlockPos, Holder<Structure>> start = structureAt(data, generator, targets, placement, chunk);
+				if (start != null) {
+					starts.add(start);
+				}
+			}
+		}
+		return starts;
+	}
+
 	private static Pair<BlockPos, Holder<Structure>> nearestInRings(Data data, Generator generator, Set<Holder<Structure>> targets,
 		BlockPos origin, ConcentricRingsStructurePlacement placement) {
 		List<ChunkPos> positions = generator.structureState().getRingPositionsFor(placement);

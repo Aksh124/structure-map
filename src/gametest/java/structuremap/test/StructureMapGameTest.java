@@ -10,6 +10,7 @@ import java.util.function.Supplier;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
@@ -30,6 +31,7 @@ import seedcracker.SeedSolver.Observation;
 import seedcracker.SeedSolver.StructureType;
 import structuremap.StructureMapClient;
 import structuremap.StructureMapClient.Found;
+import structuremap.Waypoints;
 
 /**
  * End to end in a world with a known seed:
@@ -107,9 +109,11 @@ public class StructureMapGameTest implements FabricClientGameTest {
 			}
 			check(mismatches.isEmpty(), mismatches.size() + " searches differ from /locate: " + mismatches);
 
-			// The command itself, for the screenshot.
 			world.getServer().runCommand("tp @a 0 120 0");
 			world.getConnection().waitForChunksDownload();
+			checkWaypoints(context, world);
+
+			// The command itself, for the screenshot.
 			context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate structure minecraft:village_plains"));
 			context.waitTicks(40);
 			context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate biome minecraft:cherry_grove"));
@@ -117,6 +121,131 @@ public class StructureMapGameTest implements FabricClientGameTest {
 			context.takeScreenshot("structuremap-commands");
 			log("all " + QUERIES.size() + " searches match /locate");
 		}
+	}
+
+	/** Waypoints in Xaero's Minimap: the bulk command, the chat button's command, clear, and the slime chunk seed. */
+	private static void checkWaypoints(ClientGameTestContext context, TestSingleplayerContext world) {
+		check(Waypoints.available(), "Xaero's Minimap isn't loaded in the test");
+		waitUntil(context, 30, () -> currentWorld() != null, () -> "Xaero's Minimap has no current world");
+		BlockPos here = new BlockPos(0, 120, 0);
+		world.getServer().runCommand("tp @a 0 120 0");
+		waitUntil(context, 30, () -> Minecraft.getInstance().player.blockPosition().equals(here),
+			() -> "player is at " + context.computeOnClient(mc -> mc.player.blockPosition()));
+		context.waitTicks(20);
+		check(context.computeOnClient(mc -> mc.player.blockPosition()).equals(here), "player didn't stay put");
+
+		// 1. The nearest 8 plains villages, each checked against the server's own structure starts.
+		BlockPos origin = context.computeOnClient(mc -> mc.player.blockPosition());
+		long started = System.nanoTime();
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate waypoints 8 minecraft:village_plains"));
+		waitUntil(context, 120, () -> waypoints("Village Plains").size() >= 8,
+			() -> "only " + waypoints("Village Plains").size() + " village waypoints");
+		List<BlockPos> villages = context.computeOnClient(mc -> waypoints("Village Plains"));
+		log(String.format(Locale.ROOT, "8 village waypoints in %.1fs: %s", (System.nanoTime() - started) / 1e9, villages));
+
+		BlockPos nearest = world.getServer().computeOnServer(s ->
+			serverLocate(s, new Query(Level.OVERWORLD, "minecraft:village_plains", false, origin)));
+		List<BlockPos> sorted = new ArrayList<>(villages);
+		sorted.sort(java.util.Comparator.comparingDouble(pos -> horizontalDistanceSqr(origin, pos)));
+		check(sorted.getFirst().getX() == nearest.getX() && sorted.getFirst().getZ() == nearest.getZ(),
+			"nearest waypoint " + sorted.getFirst() + ", /locate " + nearest);
+		for (BlockPos village : villages) {
+			boolean real = world.getServer().computeOnServer(s -> {
+				ServerLevel level = s.overworld();
+				Structure plains = s.registryAccess().lookupOrThrow(Registries.STRUCTURE)
+					.getValueOrThrow(net.minecraft.world.level.levelgen.structure.BuiltinStructures.VILLAGE_PLAINS);
+				var start = level.getChunk(SectionPos.blockToSectionCoord(village.getX()), SectionPos.blockToSectionCoord(village.getZ()),
+					net.minecraft.world.level.chunk.status.ChunkStatus.STRUCTURE_STARTS).getStartForStructure(plains);
+				return start != null && start.isValid();
+			});
+			check(real, "no plains village starts at " + village);
+		}
+		// No village the server knows of within the 8th's distance is missing: compare with a brute-force scan.
+		double furthest = horizontalDistanceSqr(origin, sorted.getLast());
+		int missing = world.getServer().computeOnServer(s -> countMissedVillages(s, origin, furthest, villages));
+		check(missing == 0, missing + " plains villages closer than the 8th waypoint have no waypoint");
+		log("all 8 village waypoints are real starts, nearest first matches /locate, none missed");
+
+		// 2. Running it again adds nothing.
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate waypoints 8 minecraft:village_plains"));
+		context.waitTicks(100);
+		check(context.computeOnClient(mc -> waypoints("Village Plains").size()) == 8, "repeat added duplicates");
+
+		// 3. The [+ Waypoint] button's command, sent the way a chat click sends it.
+		Found stronghold = StructureMapClient.locateStructure("minecraft:stronghold", Level.OVERWORLD, origin).join();
+		String click = "/structurelocate waypoints add structure " + stronghold.pos().getX() + " " + stronghold.pos().getZ() + " " + stronghold.id();
+		context.runOnClient(mc -> mc.player.connection.sendUnattendedCommand(net.minecraft.commands.Commands.trimOptionalPrefix(click), null));
+		waitUntil(context, 10, () -> !waypoints("Stronghold").isEmpty(), () -> "the button's command added no stronghold waypoint");
+		log("button command added a stronghold waypoint at " + context.computeOnClient(mc -> waypoints("Stronghold")));
+
+		// 4. Your own waypoint survives clear; ours don't.
+		context.runOnClient(mc -> currentWorld().getCurrentWaypointSet().add(
+			new xaero.common.minimap.waypoints.Waypoint(1, 64, 2, "Village Plains", "V", xaero.hud.minimap.waypoint.WaypointColor.RED)));
+		context.takeScreenshot("structuremap-waypoints");
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate waypoints clear"));
+		context.waitTicks(5);
+		List<BlockPos> left = context.computeOnClient(mc -> waypoints("Village Plains"));
+		check(left.equals(List.of(new BlockPos(1, 64, 2))) && context.computeOnClient(mc -> waypoints("Stronghold")).isEmpty(),
+			"after clear: " + left);
+		log("clear removed ours and kept the hand-made one");
+
+		// 5. Xaero's slime chunk overlay gets the seed.
+		waitUntil(context, 10, () -> Objects.equals(currentWorld().getSlimeChunkSeed(), SEED),
+			() -> "slime chunk seed is " + context.computeOnClient(mc -> currentWorld().getSlimeChunkSeed()));
+		log("Xaero's slime chunk seed is set");
+	}
+
+	private static int countMissedVillages(MinecraftServer server, BlockPos origin, double maxDistanceSqr, List<BlockPos> villages) {
+		ServerLevel level = server.overworld();
+		Holder<Structure> holder = server.registryAccess().lookupOrThrow(Registries.STRUCTURE)
+			.getOrThrow(net.minecraft.world.level.levelgen.structure.BuiltinStructures.VILLAGE_PLAINS);
+		Structure plains = holder.value();
+		var placement = (net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement)
+			level.getChunkSource().getGeneratorState().getPlacementsForStructure(holder).getFirst();
+		int reach = (int) Math.ceil(Math.sqrt(maxDistanceSqr) / 16 / placement.spacing()) + 1;
+		int originX = Math.floorDiv(SectionPos.blockToSectionCoord(origin.getX()), placement.spacing());
+		int originZ = Math.floorDiv(SectionPos.blockToSectionCoord(origin.getZ()), placement.spacing());
+		int missed = 0;
+		for (int rx = originX - reach; rx <= originX + reach; rx++) {
+			for (int rz = originZ - reach; rz <= originZ + reach; rz++) {
+				var chunk = placement.getPotentialStructureChunk(level.getSeed(), rx * placement.spacing(), rz * placement.spacing());
+				BlockPos pos = placement.getLocatePos(chunk);
+				if (horizontalDistanceSqr(origin, pos) >= maxDistanceSqr) {
+					continue;
+				}
+				var start = level.getChunk(chunk.x(), chunk.z(), net.minecraft.world.level.chunk.status.ChunkStatus.STRUCTURE_STARTS)
+					.getStartForStructure(plains);
+				if (start != null && start.isValid()
+					&& villages.stream().noneMatch(v -> v.getX() == pos.getX() && v.getZ() == pos.getZ())) {
+					log("missed village at " + pos);
+					missed++;
+				}
+			}
+		}
+		return missed;
+	}
+
+	private static xaero.hud.minimap.world.MinimapWorld currentWorld() {
+		var session = xaero.hud.minimap.BuiltInHudModules.MINIMAP.getCurrentSession();
+		return session == null ? null : session.getWorldManager().getCurrentWorld();
+	}
+
+	private static List<BlockPos> waypoints(String name) {
+		List<BlockPos> found = new ArrayList<>();
+		for (var set : currentWorld().getIterableWaypointSets()) {
+			for (var waypoint : set.getWaypoints()) {
+				if (name.equals(waypoint.getName())) {
+					found.add(new BlockPos(waypoint.getX(), waypoint.getY(), waypoint.getZ()));
+				}
+			}
+		}
+		return found;
+	}
+
+	private static double horizontalDistanceSqr(BlockPos a, BlockPos b) {
+		double dx = a.getX() - b.getX();
+		double dz = a.getZ() - b.getZ();
+		return dx * dx + dz * dz;
 	}
 
 	/** The same code path as /locate structure and /locate biome, with the same limits. */
@@ -155,7 +284,7 @@ public class StructureMapGameTest implements FabricClientGameTest {
 			java.util.Set<Observation> found = new java.util.LinkedHashSet<>();
 			int[][] centres = {{0, 0}, {3000, 0}, {0, 3000}, {-3000, 0}, {0, -3000}, {3000, 3000}, {-3000, -3000}};
 			for (int[] centre : centres) {
-				for (StructureType type : StructureType.values()) {
+				for (StructureType type : List.of(StructureType.DESERT_PYRAMID, StructureType.JUNGLE_TEMPLE, StructureType.SWAMP_HUT)) {
 					var result = level.getChunkSource().getGenerator().findNearestMapStructure(level,
 						HolderSet.direct(registry.getOrThrow(keys.get(type))), new BlockPos(centre[0], 64, centre[1]), 60, false);
 					if (result != null) {
@@ -169,7 +298,7 @@ public class StructureMapGameTest implements FabricClientGameTest {
 			}
 			return new ArrayList<>(found);
 		});
-		check(targets.size() >= SeedSolver.MIN_OBSERVATIONS, "only " + targets.size() + " structures near spawn");
+		check(SeedSolver.information(targets).isEnough(), "only " + targets.size() + " structures near spawn");
 
 		for (Observation target : targets) {
 			world.getServer().runCommand("tp @a " + (target.chunkX() * 16 + 8) + " 160 " + (target.chunkZ() * 16 + 8));

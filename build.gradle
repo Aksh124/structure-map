@@ -23,13 +23,28 @@ fabricApi {
 	}
 }
 
+repositories {
+	exclusiveContent {
+		forRepository {
+			maven { url = "https://api.modrinth.com/maven" }
+		}
+		filter {
+			includeGroup "maven.modrinth"
+		}
+	}
+}
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
-	// The game test checks the hand-off from Seed Cracker, so it runs with that mod's jar.
-	gametestImplementation files("../seed-cracker/build/libs/seed-cracker-1.1.0.jar")
+	// Optional: waypoints in Xaero's Minimap when it's installed.
+	clientCompileOnly "maven.modrinth:xaeros-minimap:${project.xaero_minimap_version}"
+
+	// The game test checks the hand-off from Seed Cracker and the Xaero waypoints, so it runs with both.
+	gametestImplementation files("../seed-cracker/build/libs/seed-cracker-1.2.0.jar")
+	gametestImplementation "maven.modrinth:xaeros-minimap:${project.xaero_minimap_version}"
 }
 
 processResources {

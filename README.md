@@ -18,6 +18,24 @@ Results appear in chat, and you can click the coordinates to copy them. Searches
 dimension, so you can search the Nether and End too. The first search takes a few seconds while
 vanilla's worldgen data loads.
 
+## Xaero's Minimap
+
+With [Xaero's Minimap](https://modrinth.com/mod/xaeros-minimap) installed (optional):
+
+| Command | Effect |
+| --- | --- |
+| `/structurelocate waypoints <count> <id or #tag>` | Add waypoints for the nearest 1 to 50 structures, e.g. `/structurelocate waypoints 10 minecraft:trial_chambers` |
+| `/structurelocate waypoints clear` | Remove the waypoints Structure Map added in this world. Your own waypoints are left alone |
+
+- Every `/structurelocate structure` and `/structurelocate biome` result gets a **[+ Waypoint]**
+  button in chat.
+- Waypoints go into your current waypoint set, named after the structure ("Ancient City", "AC"),
+  so they show on the minimap, in the world and on Xaero's World Map. You can edit or delete them
+  in Xaero's waypoint menu like any other.
+- Structures have no fixed height, so their waypoints have no Y. Biome waypoints do.
+- Waypoints that are already there aren't added twice.
+- Xaero's slime chunk overlay gets the seed automatically.
+
 ## Where the seed comes from
 
 1. **Seed Cracker** (1.1.0 or later): when it cracks the seed, it hands it over automatically.
@@ -54,5 +72,8 @@ Requires JDK 25.
 ```
 
 `./gradlew runClientGameTest` makes a world with a known seed, lets Seed Cracker find it, and
-checks every search against the server's own `/locate`. It expects Seed Cracker 1.1.0 built at
-`../seed-cracker/build/libs`.
+checks every search against the server's own `/locate`. It then adds Xaero waypoints for the 8
+nearest plains villages and checks each one against the server's structure starts, with none
+missing, and also tests the chat button, `clear` and the slime chunk seed. It expects Seed Cracker
+1.2.0 built at `../seed-cracker/build/libs`. Xaero's Minimap comes from Modrinth's Maven and is
+only used to compile and test.

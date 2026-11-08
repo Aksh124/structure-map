@@ -18,6 +18,7 @@
 		"fabric-api": "*"
 	},
 	"suggests": {
-		"seedcracker": "*"
+		"seedcracker": "*",
+		"xaerominimap": "*"
 	}
 }
