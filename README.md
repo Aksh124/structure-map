@@ -11,7 +11,8 @@ loaded or don't exist yet. Requires Fabric API.
 | `/structurelocate structure <id or #tag>` | Nearest structure, e.g. `minecraft:ancient_city` or `#minecraft:village` |
 | `/structurelocate biome <id or #tag>` | Nearest biome, searched in 3D like `/locate biome` |
 | `/structurelocate godapples pyramid [count]` | Nearest desert pyramids with an enchanted golden apple in a chest (1–10, default 1) |
-| `/structurelocate godapples ancient_city [count]` | The same for ancient cities |
+| `/structurelocate godapples ancient_city [count]` | The same for ancient cities (1–50) |
+| `/structurelocate menu` | Open the list of everything you've located |
 | `/structurelocate seed` | Show the seed in use and where it came from |
 | `/structurelocate seed <value>` | Set the seed. Numbers and text seeds both work, as on the create-world screen |
 | `/structurelocate seed clear` | Forget the seed for this server |
@@ -20,12 +21,29 @@ Results appear in chat, and you can click the coordinates to copy them. Searches
 dimension, so you can search the Nether and End too. The first search takes a few seconds while
 vanilla's worldgen data loads.
 
+## Located structures menu
+
+Everything your `/structurelocate` searches find goes into a list, kept per world seed in
+`config/structuremap-history.txt`, so it's still there after you relaunch. Open it with
+`/structurelocate menu`, or bind a key to "Open located structures" in Controls.
+
+It's a table of structure, coordinates, distance from you and loot. Pyramids and ancient cities
+are tagged God apple (with how many) or Regular. If you found one with a plain search, its chests
+get checked in the background and the tag fills in a moment later. A god apple row shows the
+chest's exact coordinates rather than the structure's.
+
+You can filter by structure type, sort closest first, by type or newest first, and switch on
+"God apples only". Clicking a row copies its coordinates. Every row has a Waypoint button for
+Xaero's Minimap, and pyramids and ancient cities also have a Chests button, which lists what each
+chest holds with the god apples picked out. Clicking a chest there copies where it is.
+
+The list only shows the dimension you're in. Clear list empties it for the current seed.
+
 ## God apples
 
 `/structurelocate godapples` tells you which nearby pyramids or ancient cities have an enchanted
 golden apple in a chest, and where that chest is, without going there. Each result has a
-[+ Waypoint] button. It checks the closest structures first (up to 300 pyramids or 30 ancient
-cities) and stops once it has enough, so the nearest one usually comes back in a second or two.
+[+ Waypoint] button. It checks the closest structures first (up to 300 of either) and stops once it has enough, so the nearest one usually comes back in a second or two.
 
 The server decides a chest's loot when its chunk generates, using a random seeded from the world
 seed and the chunk. Structure Map does the same thing locally. It generates the structure from the

@@ -25,6 +25,9 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.levelgen.structure.BuiltinStructures;
 import net.minecraft.world.level.levelgen.structure.Structure;
+import structuremap.ChestContentsScreen;
+import structuremap.StructureHistory;
+import structuremap.StructureListScreen;
 import structuremap.StructureMapClient;
 import structuremap.StructureMapClient.ChestFind;
 import structuremap.StructureMapClient.LootFind;
@@ -87,6 +90,8 @@ public class GodAppleGameTest implements FabricClientGameTest {
 			context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate godapples pyramid 2"));
 			context.waitTicks(200);
 			context.takeScreenshot("structuremap-godapples");
+
+			structureList(context);
 		}
 	}
 
@@ -154,6 +159,128 @@ public class GodAppleGameTest implements FabricClientGameTest {
 		log(key.identifier() + " at chunk " + chunkX + ", " + chunkZ + ": all " + certain + " certain chests match, seeds and items ("
 			+ (simulated.size() - certain) + " uncertain)");
 		return simulated.size();
+	}
+
+	/** The located structures menu: history from commands, tags, filters, sorting, copying and the chest view. */
+	private static void structureList(ClientGameTestContext context) {
+		StructureHistory.clear(SEED);
+		for (String command : new String[] {"structurelocate structure minecraft:village_plains", "structurelocate structure minecraft:stronghold",
+			"structurelocate structure minecraft:desert_pyramid", "structurelocate godapples ancient_city 2"}) {
+			context.runOnClient(mc -> mc.player.connection.sendCommand(command));
+			context.waitTicks(5);
+		}
+		waitUntil(context, 120, () -> {
+			List<StructureHistory.Entry> entries = StructureHistory.entries(SEED);
+			return entries.size() >= 5 && entries.stream().noneMatch(entry -> entry.tag() == StructureHistory.Tag.CHECKING);
+		}, () -> "history: " + StructureHistory.entries(SEED));
+		List<StructureHistory.Entry> history = StructureHistory.entries(SEED);
+		StructureHistory.Entry pyramid = history.stream().filter(entry -> entry.id().equals("minecraft:desert_pyramid")).findFirst().orElseThrow();
+		check(pyramid.tag() == StructureHistory.Tag.GOD_APPLE && pyramid.apples() == 1, "nearest pyramid not tagged as a god apple: " + pyramid);
+		check(history.stream().filter(entry -> entry.id().equals("minecraft:ancient_city")).allMatch(entry -> entry.tag() == StructureHistory.Tag.GOD_APPLE),
+			"god apple cities not tagged");
+		check(history.stream().filter(entry -> !entry.hasLoot()).allMatch(entry -> entry.tag() == StructureHistory.Tag.NONE), "village or stronghold tagged");
+		log("history from commands: " + history.size() + " structures, pyramid tagged god apple by its background check");
+
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate menu"));
+		waitUntil(context, 5, () -> net.minecraft.client.Minecraft.getInstance().gui.screen() instanceof StructureListScreen, () -> "menu didn't open");
+		context.waitTicks(2);
+		List<StructureHistory.Entry> shown = context.computeOnClient(mc -> list().shownEntries());
+		check(shown.size() == history.size(), "menu shows " + shown.size() + " of " + history.size());
+		BlockPos origin = context.computeOnClient(mc -> mc.player.blockPosition());
+		for (int i = 1; i < shown.size(); i++) {
+			check(distance(origin, shown.get(i - 1)) <= distance(origin, shown.get(i)), "not closest first: " + shown);
+		}
+		context.takeScreenshot("structuremap-list");
+
+		List<StructureHistory.Entry> pyramids = context.computeOnClient(mc -> {
+			list().setType("minecraft:desert_pyramid");
+			return list().shownEntries();
+		});
+		check(!pyramids.isEmpty() && pyramids.stream().allMatch(entry -> entry.id().equals("minecraft:desert_pyramid")), "type filter: " + pyramids);
+		List<StructureHistory.Entry> apples = context.computeOnClient(mc -> {
+			list().setType("All structures");
+			list().setApplesOnly(true);
+			return list().shownEntries();
+		});
+		check(!apples.isEmpty() && apples.stream().allMatch(entry -> entry.tag() == StructureHistory.Tag.GOD_APPLE), "god apples only: " + apples);
+		List<String> byType = context.computeOnClient(mc -> {
+			list().setApplesOnly(false);
+			list().setSort(StructureListScreen.Sort.TYPE);
+			return list().shownEntries().stream().map(StructureHistory.Entry::id).toList();
+		});
+		List<String> sorted = new ArrayList<>(byType);
+		sorted.sort(java.util.Comparator.comparing(id -> id.substring(id.indexOf(':') + 1)));
+		check(byType.equals(sorted), "not sorted by type: " + byType);
+		List<StructureHistory.Entry> byApples = context.computeOnClient(mc -> {
+			list().clickApplesHeading();
+			return list().shownEntries();
+		});
+		check(context.computeOnClient(mc -> list().sort()) == StructureListScreen.Sort.MOST_APPLES, "heading click didn't sort");
+		for (int i = 1; i < byApples.size(); i++) {
+			check(apples(byApples.get(i - 1)) >= apples(byApples.get(i)), "not most god apples first: " + byApples);
+		}
+		check(apples(byApples.getLast()) == 0, "structures without god apples aren't at the bottom: " + byApples);
+		log("clicking the God apples heading sorts most first, none last: "
+			+ byApples.stream().map(entry -> entry.id().substring(10) + "=" + apples(entry)).toList());
+		context.takeScreenshot("structuremap-most-apples");
+		log("menu: closest first, type filter, god apples only and sort by type all work");
+
+		String copied = context.computeOnClient(mc -> {
+			list().setSort(StructureListScreen.Sort.CLOSEST);
+			list().clickRow(0);
+			// The test game's clipboard isn't the real one, so check what the screen says it copied.
+			return list().status();
+		});
+		check(copied.startsWith("Copied " + StructureListScreen.coordinates(shown.getFirst()) + " ("), "clicking a row: '" + copied + "'");
+		log("clicking a row copied " + copied);
+
+		int pyramidRow = context.computeOnClient(mc -> {
+			List<StructureHistory.Entry> rows = list().shownEntries();
+			for (int i = 0; i < rows.size(); i++) {
+				if (rows.get(i).id().equals("minecraft:desert_pyramid") && rows.get(i).tag() == StructureHistory.Tag.GOD_APPLE) {
+					return i;
+				}
+			}
+			return -1;
+		});
+		context.runOnClient(mc -> list().openChests(pyramidRow));
+		waitUntil(context, 30, () -> net.minecraft.client.Minecraft.getInstance().gui.screen() instanceof ChestContentsScreen chests
+			&& chests.chests() != null, () -> "chest view didn't load");
+		int chestApples = context.computeOnClient(mc -> ((ChestContentsScreen) mc.gui.screen()).chests().stream()
+			.flatMap(chest -> chest.items().stream()).filter(stack -> stack.is(Items.ENCHANTED_GOLDEN_APPLE)).mapToInt(ItemStack::getCount).sum());
+		check(chestApples == 1, "chest view shows " + chestApples + " god apples");
+		context.waitTicks(2);
+		context.takeScreenshot("structuremap-chests");
+		context.runOnClient(mc -> mc.gui.screen().onClose());
+		check(context.computeOnClient(mc -> mc.gui.screen() instanceof StructureListScreen), "Back didn't return to the list");
+		context.runOnClient(mc -> mc.gui.screen().onClose());
+		check(java.nio.file.Files.exists(net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("structuremap-history.txt")),
+			"history not saved");
+		log("chest view shows the god apple, Back returns to the list, history saved");
+	}
+
+	private static int apples(StructureHistory.Entry entry) {
+		return entry.tag() == StructureHistory.Tag.GOD_APPLE ? entry.apples() : 0;
+	}
+
+	private static StructureListScreen list() {
+		return (StructureListScreen) net.minecraft.client.Minecraft.getInstance().gui.screen();
+	}
+
+	private static double distance(BlockPos origin, StructureHistory.Entry entry) {
+		BlockPos pos = StructureListScreen.shownPos(entry);
+		return Math.hypot(origin.getX() - pos.getX(), origin.getZ() - pos.getZ());
+	}
+
+	private static void waitUntil(ClientGameTestContext context, int seconds, java.util.function.BooleanSupplier done,
+		java.util.function.Supplier<String> failure) {
+		for (int tick = 0; tick < seconds * 20; tick++) {
+			if (context.computeOnClient(mc -> done.getAsBoolean())) {
+				return;
+			}
+			context.waitTick();
+		}
+		throw new AssertionError(failure.get());
 	}
 
 	private static final java.util.Set<BlockPos> COMPARED = new java.util.HashSet<>();

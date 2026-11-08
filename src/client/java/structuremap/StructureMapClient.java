@@ -31,7 +31,10 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.loader.api.FabricLoader;
+import com.mojang.blaze3d.platform.InputConstants;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ServerData;
@@ -83,10 +86,23 @@ public final class StructureMapClient implements ClientModInitializer {
 	static final int MAX_WAYPOINTS = 50;
 
 	private static int ticks;
+	private static boolean openListNextTick;
+	private static final KeyMapping OPEN_LIST = new KeyMapping("key.structuremap.list", InputConstants.UNKNOWN.getValue(),
+		KeyMapping.Category.register(Identifier.fromNamespaceAndPath("structuremap", "keys")));
 
 	@Override
 	public void onInitializeClient() {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, context) -> registerCommands(dispatcher));
+		KeyMappingHelper.registerKeyMapping(OPEN_LIST);
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			while (OPEN_LIST.consumeClick()) {
+				openListNextTick = true;
+			}
+			if (openListNextTick && client.player != null) {
+				openListNextTick = false;
+				client.gui.setScreen(new StructureListScreen(null));
+			}
+		});
 		if (Waypoints.available()) {
 			// Xaero's slime chunk overlay needs the seed, and the Minimap world can change at any time.
 			ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -341,6 +357,10 @@ public final class StructureMapClient implements ClientModInitializer {
 						.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
 						.executes(context -> addNearestWaypoints(context.getSource(), StringArgumentType.getString(context, "structure"),
 							IntegerArgumentType.getInteger(context, "count"))))))
+			.then(literal("menu").executes(context -> {
+				openListNextTick = true;
+				return Command.SINGLE_SUCCESS;
+			}))
 			.then(literal("godapples")
 				.then(literal("pyramid")
 					.executes(context -> godApples(context.getSource(), "minecraft:desert_pyramid", "desert pyramid", 1, 300))
@@ -348,10 +368,10 @@ public final class StructureMapClient implements ClientModInitializer {
 						.executes(context -> godApples(context.getSource(), "minecraft:desert_pyramid", "desert pyramid",
 							IntegerArgumentType.getInteger(context, "count"), 300))))
 				.then(literal("ancient_city")
-					.executes(context -> godApples(context.getSource(), "minecraft:ancient_city", "ancient city", 1, 30))
-					.then(argument("count", IntegerArgumentType.integer(1, 10))
+					.executes(context -> godApples(context.getSource(), "minecraft:ancient_city", "ancient city", 1, 300))
+					.then(argument("count", IntegerArgumentType.integer(1, 50))
 						.executes(context -> godApples(context.getSource(), "minecraft:ancient_city", "ancient city",
-							IntegerArgumentType.getInteger(context, "count"), 30)))))
+							IntegerArgumentType.getInteger(context, "count"), 300)))))
 			.then(literal("structure").then(argument("structure", StringArgumentType.greedyString())
 				.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
 				.executes(context -> search(context.getSource(), StringArgumentType.getString(context, "structure"), false))))
@@ -383,6 +403,46 @@ public final class StructureMapClient implements ClientModInitializer {
 				}))));
 	}
 
+	// The structure list
+
+	/** Adds a find to the list, and checks a pyramid's or ancient city's chests in the background. */
+	static void record(String id, BlockPos pos, ResourceKey<Level> dimension) {
+		Long forSeed = seed;
+		if (forSeed == null) {
+			return;
+		}
+		StructureHistory.Entry entry = StructureHistory.add(forSeed, dimension.identifier().toString(), id, pos, false);
+		if (entry.tag() == StructureHistory.Tag.CHECKING) {
+			checkLoot(entry);
+		}
+	}
+
+	/** Works out whether a listed pyramid or ancient city has a god apple. */
+	public static CompletableFuture<Void> checkLoot(StructureHistory.Entry entry) {
+		ResourceKey<Level> dimension = ResourceKey.create(Registries.DIMENSION, Identifier.parse(entry.dimension()));
+		Long forSeed = seed;
+		if (forSeed == null || forSeed != entry.seed()) {
+			return CompletableFuture.completedFuture(null);
+		}
+		return simulateChests(Identifier.parse(entry.id()), dimension, entry.chunkX(), entry.chunkZ()).thenAccept(chests -> {
+			int apples = 0;
+			BlockPos chest = null;
+			for (ChestFind find : chests) {
+				int here = find.items().stream().filter(stack -> stack.is(Items.ENCHANTED_GOLDEN_APPLE)).mapToInt(ItemStack::getCount).sum();
+				if (here > 0 && find.certain()) {
+					apples += here;
+					if (chest == null) {
+						chest = find.pos();
+					}
+				}
+			}
+			StructureHistory.setLoot(entry, apples, chest);
+		}).exceptionally(error -> {
+			LOGGER.warn("Couldn't check the chests of {} at {}", entry.id(), entry.pos(), error);
+			return null;
+		});
+	}
+
 	/** Nearest pyramids or ancient cities with an enchanted golden apple in a chest. */
 	private static int godApples(FabricClientCommandSource source, String structure, String label, int count, int maxChecked) {
 		Minecraft mc = Minecraft.getInstance();
@@ -411,6 +471,11 @@ public final class StructureMapClient implements ClientModInitializer {
 			}
 			for (LootFind find : found) {
 				ChestFind chest = find.chests().getFirst();
+				if (find.id() != null) {
+					StructureHistory.Entry entry = StructureHistory.add(seed, mc.level.dimension().identifier().toString(), find.id().toString(),
+						find.structure(), false);
+					StructureHistory.setLoot(entry, find.count(), chest.pos());
+				}
 				BlockPos pos = chest.pos();
 				int distance = (int) Math.round(Math.sqrt(Math.pow(origin.getX() - pos.getX(), 2) + Math.pow(origin.getZ() - pos.getZ(), 2)));
 				String coords = pos.getX() + " " + pos.getY() + " " + pos.getZ();
@@ -464,6 +529,9 @@ public final class StructureMapClient implements ClientModInitializer {
 				return;
 			}
 			BlockPos pos = found.pos();
+			if (!biome && found.id() != null) {
+				record(found.id().toString(), pos, dimension);
+			}
 			int distance = (int) Math.round(Math.sqrt(biome
 				? origin.distSqr(pos)
 				: Math.pow(origin.getX() - pos.getX(), 2) + Math.pow(origin.getZ() - pos.getZ(), 2)));
@@ -536,6 +604,7 @@ public final class StructureMapClient implements ClientModInitializer {
 			List<Waypoints.Mark> marks = new ArrayList<>();
 			for (Found each : found) {
 				if (each.id() != null) {
+					record(each.id().toString(), each.pos(), mc.level.dimension());
 					marks.add(Waypoints.forStructure(each.id(), each.pos()));
 				}
 			}
