@@ -32,8 +32,20 @@ public final class Waypoints {
 		return FabricLoader.getInstance().isModLoaded("xaerominimap");
 	}
 
+	/** Ancient cities always get dark aqua, so they stand out from everything else. */
+	static final int ANCIENT_CITY_COLOR = Integer.MIN_VALUE;
+
 	public static Mark forStructure(Identifier id, BlockPos pos) {
-		return new Mark(displayName(id), symbol(id), pos.getX(), pos.getY(), pos.getZ(), false, id.hashCode());
+		return new Mark(displayName(id), symbol(id), pos.getX(), pos.getY(), pos.getZ(), false, colorKey(id));
+	}
+
+	/** A god apple find: "Ancient City - God Apple" or "Desert Pyramid - God Apple". */
+	public static Mark forGodApple(Identifier id, BlockPos pos) {
+		return new Mark(displayName(id) + " - God Apple", symbol(id), pos.getX(), pos.getY(), pos.getZ(), false, colorKey(id));
+	}
+
+	private static int colorKey(Identifier id) {
+		return id.getPath().equals("ancient_city") ? ANCIENT_CITY_COLOR : id.hashCode();
 	}
 
 	public static Mark forBiome(Identifier id, BlockPos pos) {
@@ -107,7 +119,8 @@ public final class Waypoints {
 		if (!available()) {
 			return null;
 		}
-		List<Mark> marks = positions.stream().map(pos -> forStructure(id, pos)).toList();
+		// Either name: a plain search result or a god apple find.
+		List<Mark> marks = positions.stream().flatMap(pos -> java.util.stream.Stream.of(forStructure(id, pos), forGodApple(id, pos))).toList();
 		String world = XaeroBridge.worldKey();
 		if (!done) {
 			// Undo whichever happened: switch disabled ones back on, put deleted ones back.
@@ -118,7 +131,7 @@ public final class Waypoints {
 			for (String line : lines) {
 				Mark mark = decode(world, line);
 				if (mark != null && marks.stream().anyMatch(m -> m.x() == mark.x() && m.z() == mark.z() && m.name().equals(mark.name()))) {
-					restore.add(new Mark(mark.name(), mark.symbol(), mark.x(), mark.y(), mark.z(), mark.hasY(), id.hashCode()));
+					restore.add(new Mark(mark.name(), mark.symbol(), mark.x(), mark.y(), mark.z(), mark.hasY(), colorKey(id)));
 				} else {
 					kept.add(line);
 				}
@@ -131,12 +144,14 @@ public final class Waypoints {
 			case KEEP -> null;
 			case DISABLE -> XaeroBridge.setDisabled(marks, true) > 0 ? "disabled its waypoint" : null;
 			case DELETE -> {
-				if (XaeroBridge.remove(marks) == 0) {
+				// Only the ones that exist, so unchecking puts back just those.
+				List<Mark> existing = marks.stream().filter(mark -> XaeroBridge.disabled(mark) != null).toList();
+				if (existing.isEmpty() || XaeroBridge.remove(existing) == 0) {
 					yield null;
 				}
 				// Remembered, so unchecking can put it back.
 				List<String> lines = readLines(deletedFile());
-				for (Mark mark : marks) {
+				for (Mark mark : existing) {
 					lines.add(encode(world, mark));
 				}
 				writeLines(deletedFile(), lines);
@@ -147,11 +162,54 @@ public final class Waypoints {
 
 	/** The structure's waypoint at this position: whether it's disabled, or null if there isn't one. For the game test. */
 	public static Boolean waypointDisabled(Identifier id, BlockPos pos) {
-		return XaeroBridge.disabled(forStructure(id, pos));
+		Boolean found = XaeroBridge.disabled(forStructure(id, pos));
+		return found != null ? found : XaeroBridge.disabled(forGodApple(id, pos));
+	}
+
+	/** The colour a structure waypoint gets, e.g. "DARK_AQUA". For the game test. */
+	public static String colorName(Identifier id, BlockPos pos) {
+		return XaeroBridge.colorName(forStructure(id, pos));
+	}
+
+	/** Whether there is a waypoint with this name here. For the game test. */
+	public static boolean exists(String name, int x, int z) {
+		return XaeroBridge.disabled(new Mark(name, "", x, 0, z, false, 0)) != null;
+	}
+
+	/** Adds a waypoint without tracking it, like one you made yourself. For the game test. */
+	public static void addUntracked(String name, int x, int z) {
+		XaeroBridge.add(List.of(new Mark(name, "X", x, 0, z, false, 0)));
 	}
 
 	private static Path deletedFile() {
 		return FabricLoader.getInstance().getConfigDir().resolve("structuremap-deleted-waypoints.txt");
+	}
+
+	/**
+	 * Removes the waypoints Structure Map added outside this border, in the Minimap world you're in.
+	 * Your own waypoints are never touched. Returns how many were removed. Client thread.
+	 */
+	public static int removeOutside(WorldBorders.Border border) {
+		if (!available()) {
+			return 0;
+		}
+		String world = XaeroBridge.worldKey();
+		List<String> kept = new ArrayList<>();
+		List<Mark> outside = new ArrayList<>();
+		for (String line : readLines()) {
+			Mark mark = decode(world, line);
+			if (mark != null && !border.contains(new BlockPos(mark.x(), mark.y(), mark.z()))) {
+				outside.add(mark);
+			} else {
+				kept.add(line);
+			}
+		}
+		if (outside.isEmpty()) {
+			return 0;
+		}
+		int removed = XaeroBridge.remove(outside);
+		writeLines(kept);
+		return removed;
 	}
 
 	/** Gives Xaero's slime chunk overlay the seed. Returns true if it changed. Client thread. */

@@ -32,6 +32,7 @@ import structuremap.StructureMapClient;
 import structuremap.StructureMapSettings;
 import structuremap.StructureMapSettingsScreen;
 import structuremap.Waypoints;
+import structuremap.WorldBorders;
 import structuremap.StructureMapClient.ChestFind;
 import structuremap.StructureMapClient.LootFind;
 
@@ -97,6 +98,7 @@ public class GodAppleGameTest implements FabricClientGameTest {
 			sweep(context);
 			structureList(context);
 			checkingOff(context);
+			border(context);
 		}
 	}
 
@@ -247,6 +249,73 @@ public class GodAppleGameTest implements FabricClientGameTest {
 		check(!second.structure().equals(first.structure()), "god apple search still found the checked-off city");
 		log("god apple search skips the checked-off city at " + first.structure() + ", next is " + second.structure());
 		// Leave nothing checked off for the /locate comparison that runs next.
+		StructureHistory.clear(SEED);
+	}
+
+	/** World border: deletes history and Structure Map waypoints outside it, keeps your own, and searches stay inside. Also waypoint names and colours. */
+	private static void border(ClientGameTestContext context) {
+		StructureHistory.clear(SEED);
+		Identifier city = Identifier.parse("minecraft:ancient_city");
+		Identifier village = Identifier.parse("minecraft:village_plains");
+		check("DARK_AQUA".equals(context.computeOnClient(mc -> Waypoints.colorName(city, BlockPos.ZERO))), "ancient cities aren't dark aqua");
+		check(!"DARK_AQUA".equals(context.computeOnClient(mc -> Waypoints.colorName(village, BlockPos.ZERO))), "villages are dark aqua too");
+
+		BlockPos inside = new BlockPos(500, 0, -700);
+		BlockPos outside = new BlockPos(5000, 0, 5000);
+		BlockPos mine = new BlockPos(6000, 0, -6000);
+		StructureHistory.add(SEED, "minecraft:overworld", "minecraft:village_plains", inside, false);
+		StructureHistory.add(SEED, "minecraft:overworld", "minecraft:village_plains", outside, false);
+		for (String command : new String[] {
+			"structurelocate waypoints add structure " + inside.getX() + " " + inside.getZ() + " minecraft:village_plains",
+			"structurelocate waypoints add structure " + outside.getX() + " " + outside.getZ() + " minecraft:village_plains",
+			"structurelocate waypoints add godapple " + outside.getX() + " " + outside.getZ() + " minecraft:ancient_city"}) {
+			context.runOnClient(mc -> mc.player.connection.sendCommand(command));
+			context.waitTicks(3);
+		}
+		context.runOnClient(mc -> Waypoints.addUntracked("My Base", mine.getX(), mine.getZ()));
+		check(context.computeOnClient(mc -> Waypoints.exists("Ancient City - God Apple", outside.getX(), outside.getZ())), "no \"Ancient City - God Apple\" waypoint");
+		log("ancient cities are dark aqua; god apple waypoint is named \"Ancient City - God Apple\"");
+
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate border 2000"));
+		context.waitTicks(3);
+		WorldBorders.Border border = context.computeOnClient(mc -> StructureMapClient.currentBorder());
+		check(border != null && border.minX() == -2000 && border.maxZ() == 2000, "border not set: " + border);
+		List<StructureHistory.Entry> left = StructureHistory.entries(SEED);
+		check(left.size() == 1 && left.getFirst().pos().getX() == inside.getX(), "history outside not deleted: " + left);
+		check(context.computeOnClient(mc -> Waypoints.exists("Village Plains", inside.getX(), inside.getZ())), "waypoint inside was deleted");
+		check(!context.computeOnClient(mc -> Waypoints.exists("Village Plains", outside.getX(), outside.getZ())), "waypoint outside kept");
+		check(!context.computeOnClient(mc -> Waypoints.exists("Ancient City - God Apple", outside.getX(), outside.getZ())), "god apple waypoint outside kept");
+		check(context.computeOnClient(mc -> Waypoints.exists("My Base", mine.getX(), mine.getZ())), "your own waypoint was deleted");
+		log("border 2000: history and Structure Map waypoints outside deleted, your own waypoint kept");
+
+		BlockPos origin = context.computeOnClient(mc -> mc.player.blockPosition());
+		for (StructureMapClient.Found found : StructureMapClient.locateStructures("minecraft:village_plains", Level.OVERWORLD, origin, 3).join()) {
+			check(found.pos() != null && border.contains(found.pos()), "village found outside the border: " + found.pos());
+		}
+		long mansionStart = System.nanoTime();
+		StructureMapClient.Found mansion = StructureMapClient.locateStructure("minecraft:mansion", Level.OVERWORLD, origin).join();
+		double mansionSeconds = (System.nanoTime() - mansionStart) / 1e9;
+		check(mansionSeconds < 30, "mansion search inside the border took " + mansionSeconds + "s");
+		check(mansion.pos() == null || border.contains(mansion.pos()), "mansion found outside the border: " + mansion.pos());
+		log(String.format(java.util.Locale.ROOT, "searches stay inside the border (mansion: %s, in %.1fs)", mansion.pos(), mansionSeconds));
+
+		// The settings screen's buttons.
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate settings"));
+		waitUntil(context, 5, () -> net.minecraft.client.Minecraft.getInstance().gui.screen() instanceof StructureMapSettingsScreen,
+			() -> "settings didn't open");
+		context.waitTicks(2);
+		String used = context.computeOnClient(mc -> ((StructureMapSettingsScreen) mc.gui.screen()).pressUseWorldBorder());
+		WorldBorders.Border world = context.computeOnClient(mc -> StructureMapClient.currentBorder());
+		check(world != null && world.maxX() > 1_000_000, "world border not used: " + world + " / " + used);
+		context.takeScreenshot("structuremap-border-settings");
+		String removed = context.computeOnClient(mc -> ((StructureMapSettingsScreen) mc.gui.screen()).pressRemoveBorder());
+		check(context.computeOnClient(mc -> StructureMapClient.currentBorder()) == null, "border not removed: " + removed);
+		context.runOnClient(mc -> mc.gui.screen().onClose());
+		log("settings: " + used + " / " + removed);
+
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate waypoints clear"));
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate border off"));
+		context.waitTicks(2);
 		StructureHistory.clear(SEED);
 	}
 

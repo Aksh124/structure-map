@@ -186,6 +186,12 @@ final class Locator {
 	 */
 	static void visitNearest(Data data, Generator generator, HolderSet<Structure> targets, BlockPos origin, int maxCount,
 		java.util.function.Predicate<Pair<BlockPos, Holder<Structure>>> visitor) {
+		visitNearest(data, generator, targets, origin, maxCount, Double.POSITIVE_INFINITY, visitor);
+	}
+
+	/** As above, but stops once everything within {@code maxDistance} blocks has been visited (for a world border). */
+	static void visitNearest(Data data, Generator generator, HolderSet<Structure> targets, BlockPos origin, int maxCount, double maxDistance,
+		java.util.function.Predicate<Pair<BlockPos, Holder<Structure>>> visitor) {
 		Map<StructurePlacement, Set<Holder<Structure>>> byPlacement = new LinkedHashMap<>();
 		for (Holder<Structure> target : targets) {
 			for (StructurePlacement placement : generator.structureState().getPlacementsForStructure(target)) {
@@ -223,6 +229,9 @@ final class Locator {
 				if (visitor.test(pending.removeFirst()) || ++visited >= maxCount) {
 					return;
 				}
+			}
+			if (safe > maxDistance) {
+				return;
 			}
 		}
 	}

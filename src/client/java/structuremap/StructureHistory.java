@@ -74,7 +74,7 @@ public final class StructureHistory {
 	}
 
 	/** Adds a find, keeping what's already known about it. Returns the stored entry. */
-	static synchronized Entry add(long seed, String dimension, String id, BlockPos pos, boolean hasY) {
+	public static synchronized Entry add(long seed, String dimension, String id, BlockPos pos, boolean hasY) {
 		load();
 		Entry fresh = new Entry(seed, dimension, id, pos, hasY, pos.getX() >> 4, pos.getZ() >> 4,
 			LOOT_STRUCTURES.contains(id) ? Tag.CHECKING : Tag.NONE, 0, null, System.currentTimeMillis(), false);
@@ -120,6 +120,15 @@ public final class StructureHistory {
 		return (int) entries.values().stream().filter(entry -> entry.seed() == seed && entry.done()).count();
 	}
 
+	/** Removes everything outside this border in this dimension. Returns how many were removed. */
+	public static synchronized int removeOutside(long seed, String dimension, WorldBorders.Border border) {
+		load();
+		int before = entries.size();
+		entries.values().removeIf(entry -> entry.seed() == seed && entry.dimension().equals(dimension)
+			&& !border.contains(entry.pos()) && (entry.chest() == null || !border.contains(entry.chest())));
+		save();
+		return before - entries.size();
+	}
 	/** Forgets everything found for this seed. Returns how many were removed. */
 	public static synchronized int clear(long seed) {
 		load();

@@ -212,7 +212,7 @@ public final class StructureMapClient implements ClientModInitializer {
 			if (result != null && isDone(forSeed, dimension, result)) {
 				// That one is checked off: the nearest one that isn't.
 				List<Pair<BlockPos, Holder<Structure>>> next = new ArrayList<>();
-				Locator.visitNearest(loaded, gen, targets, origin, 500, start -> {
+				Locator.visitNearest(loaded, gen, targets, origin, 500, reach(dimension, origin), start -> {
 					if (isDone(forSeed, dimension, start)) {
 						return false;
 					}
@@ -240,6 +240,16 @@ public final class StructureMapClient implements ClientModInitializer {
 				throw new IllegalStateException("This dimension isn't part of the default world preset.");
 			}
 			List<Found> found = new ArrayList<>();
+			if (WorldBorders.get(serverKey(), dimension.identifier().toString()) != null) {
+				// With a border, any number could be outside it, so go outward until there are enough inside.
+				Locator.visitNearest(loaded, gen, targets, origin, 100_000, reach(dimension, origin), result -> {
+					if (!isDone(forSeed, dimension, result)) {
+						found.add(new Found(result.getFirst(), result.getSecond().unwrapKey().map(ResourceKey::identifier).orElse(null)));
+					}
+					return found.size() >= count;
+				});
+				return found;
+			}
 			// Extra to make up for any that are checked off.
 			for (Pair<BlockPos, Holder<Structure>> result : Locator.nearestStructures(loaded, gen, targets, origin,
 				count + StructureHistory.doneCount(forSeed))) {
@@ -252,8 +262,23 @@ public final class StructureMapClient implements ClientModInitializer {
 		}, WORKER);
 	}
 
-	/** Whether this structure start has been checked off in the list, so searches skip it. */
+	/** Whether searches skip this structure start: checked off in the list, or outside the world border set for here. */
+	/** How far from {@code origin} the border's farthest corner is: searches can stop there. Infinite with no border. */
+	private static double reach(ResourceKey<Level> dimension, BlockPos origin) {
+		WorldBorders.Border border = WorldBorders.get(serverKey(), dimension.identifier().toString());
+		if (border == null) {
+			return Double.POSITIVE_INFINITY;
+		}
+		double dx = Math.max(Math.abs(border.minX() - origin.getX()), Math.abs(border.maxX() - origin.getX()));
+		double dz = Math.max(Math.abs(border.minZ() - origin.getZ()), Math.abs(border.maxZ() - origin.getZ()));
+		return Math.sqrt(dx * dx + dz * dz);
+	}
+
 	private static boolean isDone(long forSeed, ResourceKey<Level> dimension, Pair<BlockPos, Holder<Structure>> start) {
+		WorldBorders.Border border = WorldBorders.get(serverKey(), dimension.identifier().toString());
+		if (border != null && !border.contains(start.getFirst())) {
+			return true;
+		}
 		String id = start.getSecond().unwrapKey().map(key -> key.identifier().toString()).orElse("");
 		return StructureHistory.isDone(forSeed, dimension.identifier().toString(), id, start.getFirst().getX() >> 4,
 			start.getFirst().getZ() >> 4);
@@ -305,7 +330,7 @@ public final class StructureMapClient implements ClientModInitializer {
 			}
 			List<LootFind> found = new ArrayList<>();
 			// Closest first, checking chests as each is found, so a nearby find returns straight away.
-			Locator.visitNearest(loaded, gen, resolve(registry, name), origin, maxChecked, result -> {
+			Locator.visitNearest(loaded, gen, resolve(registry, name), origin, maxChecked, reach(dimension, origin), result -> {
 				if (isDone(forSeed, dimension, result)) {
 					return false;
 				}
@@ -352,6 +377,11 @@ public final class StructureMapClient implements ClientModInitializer {
 				throw new IllegalStateException("This dimension isn't part of the default world preset.");
 			}
 			Pair<BlockPos, Holder<Biome>> result = Locator.nearestBiome(gen, wanted, origin);
+			WorldBorders.Border border = WorldBorders.get(serverKey(), dimension.identifier().toString());
+			if (result != null && border != null && !border.contains(result.getFirst())) {
+				// The nearest one is outside the world border, so as far as this world goes there isn't one.
+				result = null;
+			}
 			return result == null ? new Found(null, null)
 				: new Found(result.getFirst(), result.getSecond().unwrapKey().map(ResourceKey::identifier).orElse(null));
 		}, WORKER);
@@ -389,6 +419,10 @@ public final class StructureMapClient implements ClientModInitializer {
 						.then(argument("z", IntegerArgumentType.integer()).then(argument("id", StringArgumentType.greedyString())
 							.executes(context -> addWaypoint(context.getSource(), StringArgumentType.getString(context, "id"),
 								new BlockPos(IntegerArgumentType.getInteger(context, "x"), 0, IntegerArgumentType.getInteger(context, "z")), false))))))
+					.then(literal("godapple").then(argument("x", IntegerArgumentType.integer())
+						.then(argument("z", IntegerArgumentType.integer()).then(argument("id", StringArgumentType.greedyString())
+							.executes(context -> addWaypoint(context.getSource(), StringArgumentType.getString(context, "id"),
+								new BlockPos(IntegerArgumentType.getInteger(context, "x"), 0, IntegerArgumentType.getInteger(context, "z")), false, true))))))
 					.then(literal("biome").then(argument("x", IntegerArgumentType.integer()).then(argument("y", IntegerArgumentType.integer())
 						.then(argument("z", IntegerArgumentType.integer()).then(argument("id", StringArgumentType.greedyString())
 							.executes(context -> addWaypoint(context.getSource(), StringArgumentType.getString(context, "id"),
@@ -407,6 +441,21 @@ public final class StructureMapClient implements ClientModInitializer {
 				.then(argument("id", StringArgumentType.greedyString())
 					.executes(context -> checkOff(context.getSource(), IntegerArgumentType.getInteger(context, "x"),
 						IntegerArgumentType.getInteger(context, "z"), StringArgumentType.getString(context, "id"), false))))))
+			.then(literal("border")
+				.executes(context -> {
+					WorldBorders.Border border = currentBorder();
+					message(Component.literal(border == null
+						? "No border set here. Use /structurelocate border auto to use this world's border, or border <radius>."
+						: "Border: " + border.describe() + ". Searches skip anything outside it."));
+					return Command.SINGLE_SUCCESS;
+				})
+				.then(literal("auto").executes(context -> border(context.getSource(), worldBorder())))
+				.then(literal("off").executes(context -> border(context.getSource(), null)))
+				.then(argument("radius_or_x", IntegerArgumentType.integer())
+					.executes(context -> border(context.getSource(), radius(0, 0, IntegerArgumentType.getInteger(context, "radius_or_x"))))
+					.then(argument("z", IntegerArgumentType.integer()).then(argument("radius", IntegerArgumentType.integer(1))
+						.executes(context -> border(context.getSource(), radius(IntegerArgumentType.getInteger(context, "radius_or_x"),
+							IntegerArgumentType.getInteger(context, "z"), IntegerArgumentType.getInteger(context, "radius"))))))))
 			.then(literal("settings").executes(context -> {
 				openSettingsNextTick = true;
 				return Command.SINGLE_SUCCESS;
@@ -470,6 +519,63 @@ public final class StructureMapClient implements ClientModInitializer {
 	}
 
 	/** /structurelocate done and undone: check the structure starting at this position off, or back on. */
+	private static WorldBorders.Border radius(int x, int z, int radius) {
+		return radius > 0 ? WorldBorders.Border.around(x, z, radius) : null;
+	}
+
+	private static int border(FabricClientCommandSource source, WorldBorders.Border border) {
+		if (Minecraft.getInstance().level == null || serverKey() == null) {
+			source.sendError(Component.literal("Join a world first."));
+			return 0;
+		}
+		message(Component.literal(setBorder(border)));
+		return Command.SINGLE_SUCCESS;
+	}
+
+	/** The border set for the server and dimension you're in, or null. Client thread. */
+	public static WorldBorders.Border currentBorder() {
+		Minecraft mc = Minecraft.getInstance();
+		return mc.level == null ? null : WorldBorders.get(serverKey(), mc.level.dimension().identifier().toString());
+	}
+
+	/** The world border the server has for the dimension you're in, or null outside a world. Client thread. */
+	public static WorldBorders.Border worldBorder() {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.level == null) {
+			return null;
+		}
+		net.minecraft.world.level.border.WorldBorder border = mc.level.getWorldBorder();
+		return new WorldBorders.Border(border.getMinX(), border.getMinZ(), border.getMaxX(), border.getMaxZ());
+	}
+
+	/**
+	 * Sets the border for the server and dimension you're in (null removes it), then deletes the
+	 * located structures and Structure Map waypoints outside it. Waypoints you added yourself stay.
+	 * Returns a message to show. Client thread.
+	 */
+	public static String setBorder(WorldBorders.Border border) {
+		Minecraft mc = Minecraft.getInstance();
+		String server = serverKey();
+		if (mc.level == null || server == null) {
+			return "Join a world first.";
+		}
+		String dimension = mc.level.dimension().identifier().toString();
+		WorldBorders.set(server, dimension, border);
+		if (border == null) {
+			return "Removed the border. Searches cover the whole world again.";
+		}
+		int structures = seed == null ? 0 : StructureHistory.removeOutside(seed, dimension, border);
+		int waypoints = 0;
+		try {
+			waypoints = Waypoints.removeOutside(border);
+		} catch (RuntimeException e) {
+			LOGGER.warn("Couldn't remove waypoints outside the border", e);
+		}
+		return "Border set: " + border.describe() + ". Removed " + structures + " located " + (structures == 1 ? "structure" : "structures")
+			+ " and " + waypoints + " Structure Map " + (waypoints == 1 ? "waypoint" : "waypoints")
+			+ " outside it. Waypoints you added yourself were kept.";
+	}
+
 	private static int checkOff(FabricClientCommandSource source, int x, int z, String id, boolean done) {
 		Minecraft mc = Minecraft.getInstance();
 		Long forSeed = seed;
@@ -590,7 +696,7 @@ public final class StructureMapClient implements ClientModInitializer {
 					line.append(" and " + (find.chests().size() - 1) + " more chest" + (find.chests().size() == 2 ? "" : "s"));
 				}
 				if (Waypoints.available() && find.id() != null) {
-					String command = "/structurelocate waypoints add structure " + pos.getX() + " " + pos.getZ() + " " + find.id();
+					String command = "/structurelocate waypoints add godapple " + pos.getX() + " " + pos.getZ() + " " + find.id();
 					line.append(" ").append(Component.literal("[+ Waypoint]").withStyle(style -> style
 						.withColor(ChatFormatting.YELLOW)
 						.withClickEvent(new ClickEvent.RunCommand(command))
@@ -668,6 +774,11 @@ public final class StructureMapClient implements ClientModInitializer {
 	}
 
 	private static int addWaypoint(FabricClientCommandSource source, String id, BlockPos pos, boolean biome) {
+		return addWaypoint(source, id, pos, biome, false);
+	}
+
+	/** {@code godApple} names it "Ancient City - God Apple" and the like. */
+	private static int addWaypoint(FabricClientCommandSource source, String id, BlockPos pos, boolean biome, boolean godApple) {
 		if (!Waypoints.available()) {
 			source.sendError(Component.literal("Xaero's Minimap isn't installed."));
 			return 0;
@@ -677,7 +788,7 @@ public final class StructureMapClient implements ClientModInitializer {
 			source.sendError(Component.literal("Not a valid id: " + id));
 			return 0;
 		}
-		Waypoints.Mark mark = biome ? Waypoints.forBiome(parsed, pos) : Waypoints.forStructure(parsed, pos);
+		Waypoints.Mark mark = biome ? Waypoints.forBiome(parsed, pos) : godApple ? Waypoints.forGodApple(parsed, pos) : Waypoints.forStructure(parsed, pos);
 		try {
 			List<Waypoints.Mark> added = Waypoints.add(List.of(mark));
 			message(Component.literal(added.isEmpty()

@@ -442,7 +442,9 @@ public final class StructureListScreen extends Screen {
 					return;
 				}
 				BlockPos pos = shownPos(entry);
-				minecraft.player.connection.sendCommand("structurelocate waypoints add structure " + pos.getX() + " " + pos.getZ() + " " + entry.id());
+				// God apple finds get their own name, like "Ancient City - God Apple".
+				String kind = entry.tag() == Tag.GOD_APPLE ? "godapple" : "structure";
+				minecraft.player.connection.sendCommand("structurelocate waypoints add " + kind + " " + pos.getX() + " " + pos.getZ() + " " + entry.id());
 				status = "Added a waypoint for the " + displayName(entry.id()) + " at " + coordinates(entry) + ".";
 			}
 

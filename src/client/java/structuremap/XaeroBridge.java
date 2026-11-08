@@ -30,6 +30,15 @@ final class XaeroBridge {
 
 	private XaeroBridge() {}
 
+	private static WaypointColor color(Mark mark) {
+		return mark.colorKey() == Waypoints.ANCIENT_CITY_COLOR ? WaypointColor.DARK_AQUA : COLORS[Math.floorMod(mark.colorKey(), COLORS.length)];
+	}
+
+	/** The colour a mark gets, by name, for the game test. */
+	static String colorName(Mark mark) {
+		return color(mark).name();
+	}
+
 	private static MinimapSession session() {
 		MinimapSession session = BuiltInHudModules.MINIMAP.getCurrentSession();
 		if (session == null || session.getWorldManager().getCurrentWorld() == null) {
@@ -54,7 +63,7 @@ final class XaeroBridge {
 				continue;
 			}
 			Waypoint waypoint = new Waypoint(mark.x(), mark.hasY() ? mark.y() : 64, mark.z(), mark.name(), mark.symbol(),
-				COLORS[Math.floorMod(mark.colorKey(), COLORS.length)]);
+				color(mark));
 			waypoint.setYIncluded(mark.hasY());
 			set.add(waypoint);
 			added.add(mark);

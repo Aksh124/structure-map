@@ -13,7 +13,12 @@ loaded or don't exist yet. Requires Fabric API.
 | `/structurelocate godapples pyramid [count]` | Nearest desert pyramids with an enchanted golden apple in a chest (1–10, default 1) |
 | `/structurelocate godapples ancient_city [count]` | The same for ancient cities (1–50) |
 | `/structurelocate menu` | Open the list of everything you've located |
-| `/structurelocate settings` | What checking a structure off does to its waypoint |
+| `/structurelocate settings` | Settings: what checking off does to waypoints, and the world border |
+| `/structurelocate border` | Show the world border searches are limited to |
+| `/structurelocate border auto` | Use this world's border, as the server has it for your dimension |
+| `/structurelocate border <radius>` | A border of that radius around 0, 0 |
+| `/structurelocate border <x> <z> <radius>` | A border of that radius around x, z |
+| `/structurelocate border off` | Remove the border |
 | `/structurelocate seed` | Show the seed in use and where it came from |
 | `/structurelocate seed <value>` | Set the seed. Numbers and text seeds both work, as on the create-world screen |
 | `/structurelocate seed clear` | Forget the seed for this server |
@@ -52,6 +57,15 @@ button in the list, `/structurelocate settings`, or Structure Map's config butto
 By default the waypoint is disabled, so it's still in Xaero's list but hidden. You can have it
 deleted instead, or left alone. Unticking switches it back on, or puts it back if it was deleted.
 
+### World border
+
+If the server has a world border, tell Structure Map about it with `/structurelocate border auto`
+(or the "Use this world's border" button in Settings), or give a size yourself. After that, searches
+skip anything outside it and look further in to make up the numbers. Setting it also deletes the
+located structures outside it from the list, along with the waypoints Structure Map added out
+there. Waypoints you made yourself are never touched. The border is saved per server and per
+dimension.
+
 ## God apples
 
 `/structurelocate godapples` tells you which nearby pyramids or ancient cities have an enchanted
@@ -84,8 +98,9 @@ With [Xaero's Minimap](https://modrinth.com/mod/xaeros-minimap) installed (optio
 
 - Every `/structurelocate structure` and `/structurelocate biome` result gets a **[+ Waypoint]**
   button in chat.
-- Waypoints go into your current waypoint set, named after the structure ("Ancient City", "AC"),
-  so they show on the minimap, in the world and on Xaero's World Map. You can edit or delete them
+- Waypoints go into your current waypoint set, named after the structure ("Ancient City", "AC").
+  God apple finds are named "Ancient City - God Apple" or "Desert Pyramid - God Apple". Ancient
+  cities are always dark aqua so they stand out. They all they show on the minimap, in the world and on Xaero's World Map. You can edit or delete them
   in Xaero's waypoint menu like any other.
 - Structures have no fixed height, so their waypoints have no Y. Biome waypoints do.
 - Waypoints that are already there aren't added twice.
