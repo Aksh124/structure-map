@@ -48,6 +48,10 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.tags.TagKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.levelgen.WorldOptions;
@@ -208,6 +212,73 @@ public final class StructureMapClient implements ClientModInitializer {
 		}, WORKER);
 	}
 
+	/** A loot chest in a structure and what it holds when first opened. */
+	/** {@code certain} is false for ancient city chests whose loot can differ: see ChestSimulator.Chest. */
+	public record ChestFind(BlockPos pos, Identifier table, long seed, List<ItemStack> items, boolean certain) {}
+
+	/** A structure whose chests hold the item looked for. */
+	public record LootFind(BlockPos structure, Identifier id, List<ChestFind> chests, int count) {}
+
+	/** Every loot chest of the structure that starts in this chunk, and its contents. Completes off the client thread. */
+	public static CompletableFuture<List<ChestFind>> simulateChests(Identifier structureId, ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+		Long forSeed = seed;
+		if (forSeed == null) {
+			return CompletableFuture.failedFuture(new IllegalStateException(noSeedMessage()));
+		}
+		return data().thenApplyAsync(loaded -> {
+			Holder<Structure> structure = loaded.registries().lookupOrThrow(Registries.STRUCTURE)
+				.get(ResourceKey.create(Registries.STRUCTURE, structureId)).orElseThrow(() -> new IllegalArgumentException("Unknown id: " + structureId));
+			Generator gen = generatorFor(loaded, forSeed, dimension);
+			return chestsWithLoot(loaded, gen, structure, new ChunkPos(chunkX, chunkZ));
+		}, WORKER);
+	}
+
+	private static List<ChestFind> chestsWithLoot(Data loaded, Generator gen, Holder<Structure> structure, ChunkPos start) {
+		List<ChestFind> chests = new ArrayList<>();
+		for (ChestSimulator.Chest chest : ChestSimulator.chests(loaded, gen, structure, start)) {
+			chests.add(new ChestFind(chest.pos(), chest.table().identifier(), chest.seed(), ChestSimulator.roll(loaded, chest), chest.certain()));
+		}
+		return chests;
+	}
+
+	/**
+	 * The nearest structures (closest first) whose chests hold the item, checking up to {@code maxChecked} of them.
+	 * Completes off the client thread.
+	 */
+	public static CompletableFuture<List<LootFind>> findLoot(String name, Item wanted, ResourceKey<Level> dimension, BlockPos origin,
+		int wantedCount, int maxChecked) {
+		Long forSeed = seed;
+		if (forSeed == null) {
+			return CompletableFuture.failedFuture(new IllegalStateException(noSeedMessage()));
+		}
+		return data().thenApplyAsync(loaded -> {
+			Registry<Structure> registry = loaded.registries().lookupOrThrow(Registries.STRUCTURE);
+			Generator gen = generatorFor(loaded, forSeed, dimension);
+			if (gen == null) {
+				throw new IllegalStateException("This dimension isn't part of the default world preset.");
+			}
+			List<LootFind> found = new ArrayList<>();
+			// Closest first, checking chests as each is found, so a nearby find returns straight away.
+			Locator.visitNearest(loaded, gen, resolve(registry, name), origin, maxChecked, result -> {
+				List<ChestFind> withItem = new ArrayList<>();
+				int count = 0;
+				for (ChestFind chest : chestsWithLoot(loaded, gen, result.getSecond(), new ChunkPos(result.getFirst().getX() >> 4, result.getFirst().getZ() >> 4))) {
+					int here = chest.items().stream().filter(stack -> stack.is(wanted)).mapToInt(ItemStack::getCount).sum();
+					if (here > 0 && chest.certain()) {
+						withItem.add(chest);
+						count += here;
+					}
+				}
+				if (count > 0) {
+					found.add(new LootFind(result.getFirst(), result.getSecond().unwrapKey().map(ResourceKey::identifier).orElse(null),
+						withItem, count));
+				}
+				return found.size() >= wantedCount;
+			});
+			return found;
+		}, WORKER);
+	}
+
 	/** Nearest biome (an id, or a #tag) to the origin, searched in 3D like /locate biome. */
 	public static CompletableFuture<Found> locateBiome(String name, ResourceKey<Level> dimension, BlockPos origin) {
 		Long forSeed = seed;
@@ -249,7 +320,7 @@ public final class StructureMapClient implements ClientModInitializer {
 		dispatcher.register(literal("structurelocate")
 			.executes(context -> {
 				context.getSource().sendFeedback(Component.literal(
-					"/structurelocate structure <id or #tag>, /structurelocate biome <id or #tag>, /structurelocate seed [value]"
+					"/structurelocate structure <id or #tag>, /structurelocate biome <id or #tag>, /structurelocate godapples <pyramid|ancient_city> [count], /structurelocate seed [value]"
 						+ (Waypoints.available() ? ", /structurelocate waypoints <count> <id or #tag>, /structurelocate waypoints clear" : "")));
 				return Command.SINGLE_SUCCESS;
 			})
@@ -270,6 +341,17 @@ public final class StructureMapClient implements ClientModInitializer {
 						.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
 						.executes(context -> addNearestWaypoints(context.getSource(), StringArgumentType.getString(context, "structure"),
 							IntegerArgumentType.getInteger(context, "count"))))))
+			.then(literal("godapples")
+				.then(literal("pyramid")
+					.executes(context -> godApples(context.getSource(), "minecraft:desert_pyramid", "desert pyramid", 1, 300))
+					.then(argument("count", IntegerArgumentType.integer(1, 10))
+						.executes(context -> godApples(context.getSource(), "minecraft:desert_pyramid", "desert pyramid",
+							IntegerArgumentType.getInteger(context, "count"), 300))))
+				.then(literal("ancient_city")
+					.executes(context -> godApples(context.getSource(), "minecraft:ancient_city", "ancient city", 1, 30))
+					.then(argument("count", IntegerArgumentType.integer(1, 10))
+						.executes(context -> godApples(context.getSource(), "minecraft:ancient_city", "ancient city",
+							IntegerArgumentType.getInteger(context, "count"), 30)))))
 			.then(literal("structure").then(argument("structure", StringArgumentType.greedyString())
 				.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
 				.executes(context -> search(context.getSource(), StringArgumentType.getString(context, "structure"), false))))
@@ -299,6 +381,61 @@ public final class StructureMapClient implements ClientModInitializer {
 					setSeed(parsed.getAsLong(), "/structurelocate seed", true);
 					return Command.SINGLE_SUCCESS;
 				}))));
+	}
+
+	/** Nearest pyramids or ancient cities with an enchanted golden apple in a chest. */
+	private static int godApples(FabricClientCommandSource source, String structure, String label, int count, int maxChecked) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player == null || mc.level == null) {
+			return 0;
+		}
+		if (seed == null) {
+			source.sendError(Component.literal(noSeedMessage()));
+			return 0;
+		}
+		BlockPos origin = mc.player.blockPosition();
+		source.sendFeedback(Component.literal("Checking the chests of the nearest " + maxChecked + " " + label + "s for god apples...")
+			.withStyle(ChatFormatting.GRAY));
+		long started = System.nanoTime();
+		findLoot(structure, Items.ENCHANTED_GOLDEN_APPLE, mc.level.dimension(), origin, count, maxChecked).whenComplete((found, error) -> mc.execute(() -> {
+			if (error != null) {
+				Throwable cause = error.getCause() != null ? error.getCause() : error;
+				message(Component.literal(String.valueOf(cause.getMessage())).withStyle(ChatFormatting.RED));
+				LOGGER.warn("God apple search failed", cause);
+				return;
+			}
+			double seconds = (System.nanoTime() - started) / 1e9;
+			if (found.isEmpty()) {
+				message(Component.literal(String.format(Locale.ROOT, "None of the nearest %d %ss has a god apple (%.1fs).", maxChecked, label, seconds)));
+				return;
+			}
+			for (LootFind find : found) {
+				ChestFind chest = find.chests().getFirst();
+				BlockPos pos = chest.pos();
+				int distance = (int) Math.round(Math.sqrt(Math.pow(origin.getX() - pos.getX(), 2) + Math.pow(origin.getZ() - pos.getZ(), 2)));
+				String coords = pos.getX() + " " + pos.getY() + " " + pos.getZ();
+				MutableComponent line = Component.literal(String.format(Locale.ROOT, "%s with %d god apple%s, chest at ", capitalize(label), find.count(),
+					find.count() == 1 ? "" : "s")).append(copyable(coords)).append(String.format(Locale.ROOT, " (%d blocks away)", distance));
+				if (find.chests().size() > 1) {
+					line.append(" and " + (find.chests().size() - 1) + " more chest" + (find.chests().size() == 2 ? "" : "s"));
+				}
+				if (Waypoints.available() && find.id() != null) {
+					String command = "/structurelocate waypoints add structure " + pos.getX() + " " + pos.getZ() + " " + find.id();
+					line.append(" ").append(Component.literal("[+ Waypoint]").withStyle(style -> style
+						.withColor(ChatFormatting.YELLOW)
+						.withClickEvent(new ClickEvent.RunCommand(command))
+						.withHoverEvent(new HoverEvent.ShowText(Component.literal("Add a waypoint in Xaero's Minimap")))));
+				}
+				message(line);
+			}
+			message(Component.literal(String.format(Locale.ROOT, "Checked in %.1fs. Chests someone has already opened won't match.", seconds))
+				.withStyle(ChatFormatting.GRAY));
+		}));
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static String capitalize(String text) {
+		return Character.toUpperCase(text.charAt(0)) + text.substring(1);
 	}
 
 	private static int search(FabricClientCommandSource source, String name, boolean biome) {

@@ -5,7 +5,7 @@
 	"name": "Structure Map game tests",
 	"environment": "client",
 	"entrypoints": {
-		"fabric-client-gametest": ["structuremap.test.StructureMapGameTest"]
+		"fabric-client-gametest": ["structuremap.test.GodAppleGameTest", "structuremap.test.StructureMapGameTest"]
 	},
 	"depends": {
 		"structuremap": "*",

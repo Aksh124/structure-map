@@ -6,6 +6,7 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.ReloadableServerRegistries;
 import net.minecraft.server.WorldLoader;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
@@ -36,7 +37,7 @@ import net.minecraft.world.level.storage.LevelStorageSource;
 final class LocalWorldgen {
 	/** Registries and templates, loaded once and shared by every seed and dimension. */
 	record Data(CloseableResourceManager resources, RegistryAccess.Frozen registries, WorldDimensions dimensions,
-		StructureTemplateManager templates) {}
+		StructureTemplateManager templates, ReloadableServerRegistries.Holder loot) {}
 
 	/** One dimension of one seed, as a server would set it up. */
 	record Generator(long seed, ResourceKey<Level> dimension, ChunkGenerator chunkGenerator, RandomState randomState,
@@ -61,7 +62,7 @@ final class LocalWorldgen {
 				RegistryAccess.Frozen access = registries.compositeAccess();
 				StructureTemplateManager templates = new StructureTemplateManager(resources, storage, DataFixers.getDataFixer(),
 					access.lookupOrThrow(Registries.BLOCK));
-				return new Data(resources, access, dimensions, templates);
+				return new Data(resources, access, dimensions, templates, reloadable.fullRegistries());
 			},
 			Util.backgroundExecutor(),
 			Runnable::run).join();

@@ -10,6 +10,8 @@ loaded or don't exist yet. Requires Fabric API.
 | --- | --- |
 | `/structurelocate structure <id or #tag>` | Nearest structure, e.g. `minecraft:ancient_city` or `#minecraft:village` |
 | `/structurelocate biome <id or #tag>` | Nearest biome, searched in 3D like `/locate biome` |
+| `/structurelocate godapples pyramid [count]` | Nearest desert pyramids with an enchanted golden apple in a chest (1–10, default 1) |
+| `/structurelocate godapples ancient_city [count]` | The same for ancient cities |
 | `/structurelocate seed` | Show the seed in use and where it came from |
 | `/structurelocate seed <value>` | Set the seed. Numbers and text seeds both work, as on the create-world screen |
 | `/structurelocate seed clear` | Forget the seed for this server |
@@ -17,6 +19,28 @@ loaded or don't exist yet. Requires Fabric API.
 Results appear in chat, and you can click the coordinates to copy them. Searches use your current
 dimension, so you can search the Nether and End too. The first search takes a few seconds while
 vanilla's worldgen data loads.
+
+## God apples
+
+`/structurelocate godapples` tells you which nearby pyramids or ancient cities have an enchanted
+golden apple in a chest, and where that chest is, without going there. Each result has a
+[+ Waypoint] button. It checks the closest structures first (up to 300 pyramids or 30 ancient
+cities) and stops once it has enough, so the nearest one usually comes back in a second or two.
+
+The server decides a chest's loot when its chunk generates, using a random seeded from the world
+seed and the chunk. Structure Map does the same thing locally. It generates the structure from the
+seed, then places its pieces chunk by chunk in the order the server would, into a scratch copy of
+the world. Each chest picks up its loot seed from that random, and then its loot table is rolled
+the way it is when a player first opens it.
+
+Ancient cities have one catch. Some of their pieces are sculk patches, which draw from the same
+random numbers, and how far sculk spreads depends on caves and on which nearby chunks the server
+generated first. A chest placed after a sculk patch in the same chunk can't be predicted, so it's
+skipped. That came to about 1 chest in 50 in testing.
+
+I tested it against a real world: 65 chests across 3 pyramids and 2 ancient cities, and every loot
+seed and item matched what the server generated. A chest someone has already opened or broken
+won't have what was predicted, of course.
 
 ## Xaero's Minimap
 

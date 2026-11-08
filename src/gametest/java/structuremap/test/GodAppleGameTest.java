@@ -1,0 +1,201 @@
+package structuremap.test;
+
+import com.mojang.datafixers.util.Pair;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
+import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
+import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.SectionPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.Container;
+import net.minecraft.world.RandomizableContainer;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.levelgen.structure.BuiltinStructures;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import structuremap.StructureMapClient;
+import structuremap.StructureMapClient.ChestFind;
+import structuremap.StructureMapClient.LootFind;
+
+/**
+ * The chest simulation against the real thing: for real desert pyramids and an ancient city, the
+ * server generates them and every simulated chest must match a real one (position, loot table and
+ * loot seed), and opening the real chest must give the simulated items. Then the god apple search
+ * must point at a chest that really holds one.
+ */
+public class GodAppleGameTest implements FabricClientGameTest {
+	private static final long SEED = -6_421_009_337_154_802_113L;
+
+	@Override
+	public void runTest(ClientGameTestContext context) {
+		context.runOnClient(mc -> mc.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MASTER).set(0.0));
+		try (TestSingleplayerContext world = context.worldBuilder()
+			.setUseConsistentSettings(false)
+			.adjustSettings(settings -> settings.setSeed(Long.toString(SEED)))
+			.create()) {
+			world.getConnection().waitForChunksRender();
+			world.getServer().runCommand("gamemode spectator @a");
+			check(Long.valueOf(SEED).equals(StructureMapClient.seed()), "Structure Map doesn't have the world seed");
+
+			// The nearest three pyramids, then an ancient city.
+			int chests = 0;
+			for (StructureMapClient.Found pyramid : StructureMapClient.locateStructures("minecraft:desert_pyramid", Level.OVERWORLD, BlockPos.ZERO, 3).join()) {
+				chests += compare(world, BuiltinStructures.DESERT_PYRAMID, pyramid.pos());
+			}
+			for (StructureMapClient.Found city : StructureMapClient.locateStructures("minecraft:ancient_city", Level.OVERWORLD, BlockPos.ZERO, 2).join()) {
+				chests += compare(world, BuiltinStructures.ANCIENT_CITY, city.pos());
+			}
+			log("all " + chests + " simulated chests match the server's, seeds and items");
+
+			// The search itself: its answer must be a real god apple.
+			for (String structure : new String[] {"minecraft:desert_pyramid", "minecraft:ancient_city"}) {
+				long started = System.nanoTime();
+				var search = StructureMapClient.findLoot(structure, Items.ENCHANTED_GOLDEN_APPLE, Level.OVERWORLD, BlockPos.ZERO, 1,
+					structure.endsWith("pyramid") ? 300 : 30);
+				// Wait a tick at a time, so the game window keeps responding.
+				for (int tick = 0; tick < 20 * 300 && !search.isDone(); tick++) {
+					context.waitTick();
+				}
+				check(search.isDone(), structure + " search took over 5 minutes");
+				List<LootFind> found = search.join();
+				log(String.format(java.util.Locale.ROOT, "%s search took %.1fs", structure, (System.nanoTime() - started) / 1e9));
+				check(!found.isEmpty(), "no " + structure + " with a god apple found");
+				LootFind find = found.getFirst();
+				BlockPos chest = find.chests().getFirst().pos();
+				int real = world.getServer().computeOnServer(server -> {
+					ServerLevel level = server.overworld();
+					level.getChunk(chest);
+					return count(open(level, chest), Items.ENCHANTED_GOLDEN_APPLE.builtInRegistryHolder().key().identifier());
+				});
+				check(real == find.chests().getFirst().items().stream().filter(s -> s.is(Items.ENCHANTED_GOLDEN_APPLE)).mapToInt(ItemStack::getCount).sum(),
+					"the server's chest at " + chest + " has " + real + " god apples, not what was predicted");
+				log(structure + ": god apple search says " + chest + ", and the server's chest really has " + real);
+			}
+
+			context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate godapples pyramid 2"));
+			context.waitTicks(200);
+			context.takeScreenshot("structuremap-godapples");
+		}
+	}
+
+	/** Simulates the structure nearest the centre and checks it against what the server generates. Returns the chest count. */
+	private static int compare(TestSingleplayerContext world, ResourceKey<Structure> key, BlockPos centre) {
+		BlockPos start = world.getServer().computeOnServer(server -> {
+			ServerLevel level = server.overworld();
+			Holder<Structure> holder = server.registryAccess().lookupOrThrow(Registries.STRUCTURE).getOrThrow(key);
+			Pair<BlockPos, Holder<Structure>> result = level.getChunkSource().getGenerator()
+				.findNearestMapStructure(level, HolderSet.direct(holder), centre, 100, false);
+			return result.getFirst();
+		});
+		if (!COMPARED.add(start)) {
+			log(key.identifier() + " at " + start + " was already compared");
+			return 0;
+		}
+		int chunkX = SectionPos.blockToSectionCoord(start.getX());
+		int chunkZ = SectionPos.blockToSectionCoord(start.getZ());
+		List<ChestFind> simulated = StructureMapClient.simulateChests(key.identifier(), Level.OVERWORLD, chunkX, chunkZ).join();
+		check(!simulated.isEmpty(), "no chests simulated for " + key.identifier() + " at chunk " + chunkX + ", " + chunkZ);
+
+		List<String> problems = world.getServer().computeOnServer(server -> {
+			ServerLevel level = server.overworld();
+			// Generate everything the structure covers, as a player walking up would.
+			for (int cx = chunkX - 10; cx <= chunkX + 10; cx++) {
+				for (int cz = chunkZ - 10; cz <= chunkZ + 10; cz++) {
+					level.getChunk(cx, cz);
+				}
+			}
+			List<String> found = new ArrayList<>();
+			int[] uncertainMatched = new int[2];
+			for (ChestFind chest : simulated) {
+				if (!chest.certain()) {
+					// Only counted: these can differ, which is why the search leaves them out.
+					BlockEntity entity = level.getBlockEntity(chest.pos());
+					uncertainMatched[1]++;
+					if (entity instanceof RandomizableContainer container && container.getLootTableSeed() == chest.seed()) {
+						uncertainMatched[0]++;
+					}
+					continue;
+				}
+				BlockEntity entity = level.getBlockEntity(chest.pos());
+				if (!(entity instanceof RandomizableContainer container) || container.getLootTable() == null) {
+					found.add("no loot chest at " + chest.pos());
+					continue;
+				}
+				if (!container.getLootTable().identifier().equals(chest.table()) || container.getLootTableSeed() != chest.seed()) {
+					found.add("chest at " + chest.pos() + " is " + container.getLootTable().identifier() + "/" + container.getLootTableSeed()
+						+ ", simulated " + chest.table() + "/" + chest.seed());
+					continue;
+				}
+				Map<String, Integer> realItems = totals(open(level, chest.pos()));
+				Map<String, Integer> simulatedItems = totals(chest.items());
+				if (!realItems.equals(simulatedItems)) {
+					found.add("chest at " + chest.pos() + " holds " + realItems + ", simulated " + simulatedItems);
+				}
+			}
+			if (uncertainMatched[1] > 0) {
+				log(uncertainMatched[1] + " uncertain chest(s), " + uncertainMatched[0] + " of them matched anyway");
+			}
+			return found;
+		});
+		check(problems.isEmpty(), key.identifier() + " at chunk " + chunkX + ", " + chunkZ + ": " + problems);
+		long certain = simulated.stream().filter(ChestFind::certain).count();
+		log(key.identifier() + " at chunk " + chunkX + ", " + chunkZ + ": all " + certain + " certain chests match, seeds and items ("
+			+ (simulated.size() - certain) + " uncertain)");
+		return simulated.size();
+	}
+
+	private static final java.util.Set<BlockPos> COMPARED = new java.util.HashSet<>();
+
+	/** What a real chest holds once its loot is rolled, as when a player opens it. */
+	private static List<ItemStack> open(ServerLevel level, BlockPos pos) {
+		BlockEntity entity = level.getBlockEntity(pos);
+		if (!(entity instanceof RandomizableContainer container)) {
+			return List.of();
+		}
+		container.unpackLootTable(null);
+		List<ItemStack> items = new ArrayList<>();
+		Container inventory = (Container) entity;
+		for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+			if (!inventory.getItem(slot).isEmpty()) {
+				items.add(inventory.getItem(slot));
+			}
+		}
+		return items;
+	}
+
+	private static int count(List<ItemStack> items, Identifier item) {
+		return totals(items).getOrDefault(item.toString(), 0);
+	}
+
+	/** Item id to total count: the server splits stacks across slots, so only totals compare. */
+	private static Map<String, Integer> totals(List<ItemStack> items) {
+		Map<String, Integer> totals = new TreeMap<>();
+		for (ItemStack stack : items) {
+			totals.merge(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount(), Integer::sum);
+		}
+		return totals;
+	}
+
+	private static void check(boolean condition, String failure) {
+		if (!condition) {
+			throw new AssertionError(failure);
+		}
+	}
+
+	private static void log(String text) {
+		System.out.println("[structuremap-gametest] " + text);
+	}
+
+}

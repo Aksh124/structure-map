@@ -178,6 +178,55 @@ final class Locator {
 		return result;
 	}
 
+	/**
+	 * Hands target starts to the visitor closest first, as soon as each is certain: after ring r,
+	 * nothing in a later ring can be closer than r spacings, so every start within that is final.
+	 * Stops when the visitor returns true or after {@code maxCount} starts. Much faster than
+	 * {@link #nearestStructures} when the visitor is satisfied early.
+	 */
+	static void visitNearest(Data data, Generator generator, HolderSet<Structure> targets, BlockPos origin, int maxCount,
+		java.util.function.Predicate<Pair<BlockPos, Holder<Structure>>> visitor) {
+		Map<StructurePlacement, Set<Holder<Structure>>> byPlacement = new LinkedHashMap<>();
+		for (Holder<Structure> target : targets) {
+			for (StructurePlacement placement : generator.structureState().getPlacementsForStructure(target)) {
+				byPlacement.computeIfAbsent(placement, p -> new LinkedHashSet<>()).add(target);
+			}
+		}
+		if (byPlacement.keySet().stream().anyMatch(placement -> !(placement instanceof RandomSpreadStructurePlacement))) {
+			// Strongholds and the like: few enough to list first.
+			for (Pair<BlockPos, Holder<Structure>> start : nearestStructures(data, generator, targets, origin, maxCount)) {
+				if (visitor.test(start)) {
+					return;
+				}
+			}
+			return;
+		}
+		int chunkX = SectionPos.blockToSectionCoord(origin.getX());
+		int chunkZ = SectionPos.blockToSectionCoord(origin.getZ());
+		int minSpacing = byPlacement.keySet().stream().mapToInt(p -> ((RandomSpreadStructurePlacement) p).spacing()).min().orElse(1);
+		Set<BlockPos> seen = new java.util.HashSet<>();
+		List<Pair<BlockPos, Holder<Structure>>> pending = new ArrayList<>();
+		int visited = 0;
+		for (int radius = 0; radius <= STRUCTURE_SEARCH_RADIUS; radius++) {
+			for (Map.Entry<StructurePlacement, Set<Holder<Structure>>> entry : byPlacement.entrySet()) {
+				for (Pair<BlockPos, Holder<Structure>> start : allInSpreadRing(data, generator, entry.getValue(), chunkX, chunkZ, radius,
+					(RandomSpreadStructurePlacement) entry.getKey())) {
+					if (seen.add(start.getFirst())) {
+						pending.add(start);
+					}
+				}
+			}
+			pending.sort(java.util.Comparator.comparingDouble(start -> horizontalDistanceSqr(origin, start.getFirst())));
+			double safe = (radius * (double) minSpacing - 1) * 16;
+			boolean last = radius == STRUCTURE_SEARCH_RADIUS;
+			while (!pending.isEmpty() && (last || (safe > 0 && horizontalDistanceSqr(origin, pending.getFirst().getFirst()) <= safe * safe))) {
+				if (visitor.test(pending.removeFirst()) || ++visited >= maxCount) {
+					return;
+				}
+			}
+		}
+	}
+
 	private static List<Pair<Pair<BlockPos, Holder<Structure>>, Double>> sortedByDistance(
 		java.util.Collection<Pair<BlockPos, Holder<Structure>>> starts, BlockPos origin) {
 		List<Pair<Pair<BlockPos, Holder<Structure>>, Double>> sorted = new ArrayList<>();
