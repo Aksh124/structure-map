@@ -27,6 +27,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
@@ -77,7 +78,7 @@ import structuremap.LocalWorldgen.Generator;
  * matter for that, except where an ancient city's sculk patch comes first in a chunk; those chests
  * are left out. Opened or broken chests on a server are of course not reflected.
  */
-final class ChestSimulator {
+public final class ChestSimulator {
 	private static final Logger LOGGER = LoggerFactory.getLogger("structuremap");
 
 	/**
@@ -90,6 +91,8 @@ final class ChestSimulator {
 	record Loot(Chest chest, List<ItemStack> items) {}
 
 	private static final Set<String> UNHANDLED = ConcurrentHashMap.newKeySet();
+	/** Block updates the stand-in world was asked to schedule and ignored. The game test reports it. */
+	public static final java.util.concurrent.atomic.AtomicInteger SCHEDULED_TICKS = new java.util.concurrent.atomic.AtomicInteger();
 
 	private ChestSimulator() {}
 
@@ -270,6 +273,18 @@ final class ChestSimulator {
 					return RandomSource.create();
 				case "isClientSide":
 					return false;
+				case "scheduleTick":
+					SCHEDULED_TICKS.incrementAndGet();
+					// Block and fluid updates (a waterlogged candle, say) don't touch loot. Nothing to do.
+					return null;
+				case "getGameTime":
+				case "getDayTime":
+					return 0L;
+				case "getLevelData":
+					return Proxy.newProxyInstance(LevelData.class.getClassLoader(), new Class<?>[] {LevelData.class},
+						(levelData, levelMethod, levelArgs) -> levelMethod.isDefault()
+							? InvocationHandler.invokeDefault(levelData, levelMethod, levelArgs)
+							: defaultValue(levelMethod.getReturnType()));
 				case "enabledFeatures":
 					return FeatureFlags.DEFAULT_FLAGS;
 				case "getBlockTicks":

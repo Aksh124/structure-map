@@ -86,6 +86,8 @@ public final class StructureMapClient implements ClientModInitializer {
 	static final int MAX_WAYPOINTS = 50;
 
 	private static int ticks;
+	/** Structures whose chests couldn't be worked out. The game test checks this stays 0. */
+	public static final java.util.concurrent.atomic.AtomicInteger SIMULATION_FAILURES = new java.util.concurrent.atomic.AtomicInteger();
 	private static boolean openListNextTick;
 	private static boolean openSettingsNextTick;
 	private static final KeyMapping OPEN_LIST = new KeyMapping("key.structuremap.list", InputConstants.UNKNOWN.getValue(),
@@ -309,7 +311,16 @@ public final class StructureMapClient implements ClientModInitializer {
 				}
 				List<ChestFind> withItem = new ArrayList<>();
 				int count = 0;
-				for (ChestFind chest : chestsWithLoot(loaded, gen, result.getSecond(), new ChunkPos(result.getFirst().getX() >> 4, result.getFirst().getZ() >> 4))) {
+				List<ChestFind> chests;
+				try {
+					chests = chestsWithLoot(loaded, gen, result.getSecond(), new ChunkPos(result.getFirst().getX() >> 4, result.getFirst().getZ() >> 4));
+				} catch (RuntimeException e) {
+					// One structure that can't be worked out shouldn't stop the search: skip it.
+					SIMULATION_FAILURES.incrementAndGet();
+					LOGGER.warn("Couldn't work out the chests of {} at {}; skipping it", result.getSecond().getRegisteredName(), result.getFirst(), e);
+					return false;
+				}
+				for (ChestFind chest : chests) {
 					int here = chest.items().stream().filter(stack -> stack.is(wanted)).mapToInt(ItemStack::getCount).sum();
 					if (here > 0 && chest.certain()) {
 						withItem.add(chest);
@@ -548,7 +559,7 @@ public final class StructureMapClient implements ClientModInitializer {
 			return 0;
 		}
 		BlockPos origin = mc.player.blockPosition();
-		source.sendFeedback(Component.literal("Checking the chests of the nearest " + maxChecked + " " + label + "s for god apples...")
+		source.sendFeedback(Component.literal("Checking the chests of the nearest " + maxChecked + " " + plural(label) + " for god apples...")
 			.withStyle(ChatFormatting.GRAY));
 		long started = System.nanoTime();
 		findLoot(structure, Items.ENCHANTED_GOLDEN_APPLE, mc.level.dimension(), origin, count, maxChecked).whenComplete((found, error) -> mc.execute(() -> {
@@ -560,7 +571,7 @@ public final class StructureMapClient implements ClientModInitializer {
 			}
 			double seconds = (System.nanoTime() - started) / 1e9;
 			if (found.isEmpty()) {
-				message(Component.literal(String.format(Locale.ROOT, "None of the nearest %d %ss has a god apple (%.1fs).", maxChecked, label, seconds)));
+				message(Component.literal(String.format(Locale.ROOT, "None of the nearest %d %s has a god apple (%.1fs).", maxChecked, plural(label), seconds)));
 				return;
 			}
 			for (LootFind find : found) {
@@ -594,6 +605,10 @@ public final class StructureMapClient implements ClientModInitializer {
 				.withStyle(ChatFormatting.GRAY));
 		}));
 		return Command.SINGLE_SUCCESS;
+	}
+
+	private static String plural(String label) {
+		return label.endsWith("y") ? label.substring(0, label.length() - 1) + "ies" : label + "s";
 	}
 
 	private static String capitalize(String text) {

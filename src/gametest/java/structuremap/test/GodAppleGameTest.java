@@ -94,6 +94,7 @@ public class GodAppleGameTest implements FabricClientGameTest {
 			context.waitTicks(200);
 			context.takeScreenshot("structuremap-godapples");
 
+			sweep(context);
 			structureList(context);
 			checkingOff(context);
 		}
@@ -247,6 +248,44 @@ public class GodAppleGameTest implements FabricClientGameTest {
 		log("god apple search skips the checked-off city at " + first.structure() + ", next is " + second.structure());
 		// Leave nothing checked off for the /locate comparison that runs next.
 		StructureHistory.clear(SEED);
+	}
+
+	/**
+	 * Simulates the chests of many real ancient cities and pyramids and requires none to fail. Runs
+	 * on this test's seed, plus any in STRUCTUREMAP_SWEEP_SEEDS (comma-separated, for checking a
+	 * particular world locally without putting its seed in the code).
+	 */
+	private static void sweep(ClientGameTestContext context) {
+		List<Long> seeds = new ArrayList<>(List.of(SEED));
+		String extra = System.getenv("STRUCTUREMAP_SWEEP_SEEDS");
+		if (extra != null && !extra.isBlank()) {
+			for (String value : extra.split(",")) {
+				seeds.add(Long.parseLong(value.trim()));
+			}
+		}
+		int before = StructureMapClient.SIMULATION_FAILURES.get();
+		int worlds = 0;
+		for (long seed : seeds) {
+			context.runOnClient(mc -> StructureMapClient.setSeed(seed, "sweep", false));
+			for (BlockPos origin : new BlockPos[] {BlockPos.ZERO, new BlockPos(8000, 64, -8000), new BlockPos(-15000, 64, 12000)}) {
+				for (String structure : new String[] {"minecraft:ancient_city", "minecraft:desert_pyramid"}) {
+					// Barriers are never in a chest, so every structure up to the limit gets simulated.
+					var search = StructureMapClient.findLoot(structure, Items.BARRIER, Level.OVERWORLD, origin, 1,
+						structure.endsWith("city") ? 30 : 12);
+					for (int tick = 0; tick < 20 * 300 && !search.isDone(); tick++) {
+						context.waitTick();
+					}
+					check(search.isDone(), "sweep of " + structure + " took over 5 minutes");
+					search.join();
+				}
+			}
+			worlds++;
+		}
+		context.runOnClient(mc -> StructureMapClient.setSeed(SEED, "test", false));
+		int failures = StructureMapClient.SIMULATION_FAILURES.get() - before;
+		check(failures == 0, failures + " structures couldn't be simulated; see the log");
+		log("sweep: up to 90 ancient cities and 36 pyramids in each of " + worlds + " world(s) simulated with no failures"
+			+ ", " + structuremap.ChestSimulator.SCHEDULED_TICKS.get() + " water updates from waterlogged blocks handled");
 	}
 
 	private static int rowOf(StructureHistory.Entry entry) {
