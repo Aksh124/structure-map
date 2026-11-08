@@ -9,7 +9,8 @@
 	"environment": "client",
 	"entrypoints": {
 		"client": ["structuremap.StructureMapClient"],
-		"seedcracker:seed_found": ["structuremap.SeedCrackerBridge"]
+		"seedcracker:seed_found": ["structuremap.SeedCrackerBridge"],
+		"modmenu": ["structuremap.ModMenuIntegration"]
 	},
 	"depends": {
 		"fabricloader": ">=0.20.0",
@@ -19,6 +20,7 @@
 	},
 	"suggests": {
 		"seedcracker": "*",
-		"xaerominimap": "*"
+		"xaerominimap": "*",
+		"modmenu": "*"
 	}
 }

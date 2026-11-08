@@ -41,6 +41,7 @@ dependencies {
 
 	// Optional: waypoints in Xaero's Minimap when it's installed.
 	clientCompileOnly "maven.modrinth:xaeros-minimap:${project.xaero_minimap_version}"
+	clientCompileOnly "maven.modrinth:modmenu:20.0.3"
 
 	// The game test checks the hand-off from Seed Cracker and the Xaero waypoints, so it runs with both.
 	gametestImplementation files("../seed-cracker/build/libs/seed-cracker-1.2.0.jar")

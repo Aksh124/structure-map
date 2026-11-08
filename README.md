@@ -13,6 +13,7 @@ loaded or don't exist yet. Requires Fabric API.
 | `/structurelocate godapples pyramid [count]` | Nearest desert pyramids with an enchanted golden apple in a chest (1–10, default 1) |
 | `/structurelocate godapples ancient_city [count]` | The same for ancient cities (1–50) |
 | `/structurelocate menu` | Open the list of everything you've located |
+| `/structurelocate settings` | What checking a structure off does to its waypoint |
 | `/structurelocate seed` | Show the seed in use and where it came from |
 | `/structurelocate seed <value>` | Set the seed. Numbers and text seeds both work, as on the create-world screen |
 | `/structurelocate seed clear` | Forget the seed for this server |
@@ -38,6 +39,18 @@ Xaero's Minimap, and pyramids and ancient cities also have a Chests button, whic
 chest holds with the god apples picked out. Clicking a chest there copies where it is.
 
 The list only shows the dimension you're in. Clear list empties it for the current seed.
+
+### Checking structures off
+
+Once you've been to a structure, tick its box in the list, or click [✓ Done] next to it in chat.
+From then on every search skips it: `/structurelocate structure` gives you the next nearest one,
+and the waypoint and god apple searches look further out to make up the numbers. Checked-off rows
+go grey, and the Checked off switch hides them. Untick it to bring it back.
+
+Checking one off also does something to its Xaero waypoint, which you pick in Settings (the
+button in the list, `/structurelocate settings`, or Structure Map's config button in Mod Menu).
+By default the waypoint is disabled, so it's still in Xaero's list but hidden. You can have it
+deleted instead, or left alone. Unticking switches it back on, or puts it back if it was deleted.
 
 ## God apples
 

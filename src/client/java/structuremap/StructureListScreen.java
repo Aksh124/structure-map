@@ -8,7 +8,9 @@ import java.util.TreeSet;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.ContainerObjectSelectionList;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.Tooltip;
@@ -56,6 +58,8 @@ public final class StructureListScreen extends Screen {
 	private String type = ALL;
 	private Sort sort = Sort.CLOSEST;
 	private boolean applesOnly;
+	private boolean hideDone;
+	private CycleButton<Boolean> doneButton;
 
 	public StructureListScreen(Screen parent) {
 		super(Component.literal("Located structures"));
@@ -73,9 +77,9 @@ public final class StructureListScreen extends Screen {
 			}
 		}
 
-		int controlsWidth = Math.min(width - 20, 460);
+		int controlsWidth = Math.min(width - 20, 500);
 		int left = (width - controlsWidth) / 2;
-		int third = (controlsWidth - 8) / 3;
+		int third = (controlsWidth - 12) / 4;
 		List<String> types = new ArrayList<>();
 		types.add(ALL);
 		types.addAll(new TreeSet<>(all.stream().map(StructureHistory.Entry::id).toList()));
@@ -98,14 +102,24 @@ public final class StructureListScreen extends Screen {
 				applesOnly = value;
 				refresh();
 			}));
+		doneButton = addRenderableWidget(CycleButton.builder((Boolean hide) -> Component.literal(hide ? "Hidden" : "Shown"), hideDone)
+			.withValues(false, true)
+			.create(left + 3 * (third + 4), 24, third, 20, Component.literal("Checked off"), (button, value) -> {
+				hideDone = value;
+				refresh();
+			}));
+		doneButton.setTooltip(Tooltip.create(Component.literal("Show or hide the structures you've checked off."
+			+ " Searches skip them either way.")));
 
-		list = addRenderableWidget(new StructureList(mc, Math.min(width - 10, 520), height - 64 - 54, 64));
+		list = addRenderableWidget(new StructureList(mc, Math.min(width - 10, 540), height - 64 - 54, 64));
 		list.setX((width - list.getWidth()) / 2);
 
 		clearButton = addRenderableWidget(Button.builder(Component.literal("Clear list"), button -> clear())
-			.bounds(width / 2 - 155, height - 28, 150, 20).build());
+			.bounds(width / 2 - 154, height - 28, 100, 20).build());
+		addRenderableWidget(Button.builder(Component.literal("Settings"), button -> minecraft.gui.setScreen(new StructureMapSettingsScreen(this)))
+			.bounds(width / 2 - 50, height - 28, 100, 20).build());
 		addRenderableWidget(Button.builder(Component.literal("Done"), button -> onClose())
-			.bounds(width / 2 + 5, height - 28, 150, 20).build());
+			.bounds(width / 2 + 54, height - 28, 100, 20).build());
 		refresh();
 	}
 
@@ -126,7 +140,7 @@ public final class StructureListScreen extends Screen {
 		BlockPos here = playerPos();
 		List<StructureHistory.Entry> shown = new ArrayList<>();
 		for (StructureHistory.Entry entry : all) {
-			if ((type.equals(ALL) || entry.id().equals(type)) && (!applesOnly || entry.tag() == Tag.GOD_APPLE)) {
+			if ((type.equals(ALL) || entry.id().equals(type)) && (!applesOnly || entry.tag() == Tag.GOD_APPLE) && !(hideDone && entry.done())) {
 				shown.add(entry);
 			}
 		}
@@ -139,7 +153,7 @@ public final class StructureListScreen extends Screen {
 			case MOST_APPLES -> Comparator.comparingInt((StructureHistory.Entry entry) -> -apples(entry)).thenComparing(closest);
 		});
 		list.show(shown);
-		if (status == null || !status.startsWith("Copied")) {
+		if (status == null || !(status.startsWith("Copied") || status.startsWith("Checked off") || status.startsWith("Unchecked"))) {
 			status = all.isEmpty() ? (StructureMapClient.seed() == null ? status
 				: "Nothing located in this dimension yet. Structures you find with /structurelocate appear here.")
 				: shown.size() + " of " + all.size() + " shown. Click a row to copy its coordinates.";
@@ -288,6 +302,16 @@ public final class StructureListScreen extends Screen {
 		return sort;
 	}
 
+	public void setDone(int index, boolean done) {
+		list.children().get(index).setDone(done);
+	}
+
+	public void setHideDone(boolean value) {
+		doneButton.setValue(value);
+		hideDone = value;
+		refresh();
+	}
+
 	public void clickRow(int index) {
 		list.children().get(index).copy();
 	}
@@ -320,7 +344,8 @@ public final class StructureListScreen extends Screen {
 
 		/** Left edge of each text column. */
 		int[] columns() {
-			int left = getRowLeft() + 2;
+			// After the checkbox.
+			int left = getRowLeft() + 24;
 			int text = getRowWidth() - 116;
 			return new int[] {left, left + (int) (text * 0.29), left + (int) (text * 0.60), left + (int) (text * 0.75)};
 		}
@@ -329,10 +354,15 @@ public final class StructureListScreen extends Screen {
 			final StructureHistory.Entry entry;
 			private final Button chests;
 			private final Button waypoint;
-			private final List<Button> buttons = new ArrayList<>();
+			private final Checkbox check;
+			private final List<AbstractWidget> buttons = new ArrayList<>();
 
 			Row(StructureHistory.Entry entry) {
 				this.entry = entry;
+				check = Checkbox.builder(Component.empty(), font).selected(entry.done()).onValueChange((box, value) -> setDone(value))
+					.tooltip(Tooltip.create(Component.literal("Check it off: searches skip it, and its waypoint is updated as set in Settings")))
+					.build();
+				buttons.add(check);
 				if (entry.hasLoot()) {
 					chests = Button.builder(Component.literal("Chests"), button -> openChests()).size(50, 20).build();
 					chests.setTooltip(Tooltip.create(Component.literal("What each chest holds")));
@@ -354,13 +384,18 @@ public final class StructureListScreen extends Screen {
 				// Up to the Chests button, or where it would be.
 				int lootWidth = getContentRight() - 116 - columns[3];
 				double distance = Math.sqrt(distanceSqr(playerPos(), shownPos(entry)));
-				graphics.text(font, Component.literal(fit(displayName(entry.id()), columns[1] - columns[0] - 4)), columns[0], y, WHITE);
-				graphics.text(font, Component.literal(fit(coordinates(entry), columns[2] - columns[1] - 4)), columns[1], y, WHITE);
-				graphics.text(font, Component.literal(String.format(Locale.ROOT, "%,d m", Math.round(distance))), columns[2], y, GRAY);
+				check.setPosition(getContentX() + 2, getContentY() + 1);
+				check.extractRenderState(graphics, mouseX, mouseY, partialTick);
+				// Checked-off rows are greyed out.
+				int main = entry.done() ? DARK : WHITE;
+				int dim = entry.done() ? DARK : GRAY;
+				graphics.text(font, Component.literal(fit(displayName(entry.id()), columns[1] - columns[0] - 4)), columns[0], y, main);
+				graphics.text(font, Component.literal(fit(coordinates(entry), columns[2] - columns[1] - 4)), columns[1], y, main);
+				graphics.text(font, Component.literal(String.format(Locale.ROOT, "%,d m", Math.round(distance))), columns[2], y, dim);
 				switch (entry.tag()) {
 					case GOD_APPLE -> graphics.text(font, Component.literal(fit("God apple" + (entry.apples() > 1 ? " ×" + entry.apples() : ""), lootWidth)),
-						columns[3], y, GOLD);
-					case REGULAR -> graphics.text(font, Component.literal("Regular"), columns[3], y, GRAY);
+						columns[3], y, entry.done() ? DARK : GOLD);
+					case REGULAR -> graphics.text(font, Component.literal("Regular"), columns[3], y, dim);
 					case CHECKING -> graphics.text(font, Component.literal("Checking…"), columns[3], y, DARK);
 					case NONE -> { }
 				}
@@ -390,6 +425,12 @@ public final class StructureListScreen extends Screen {
 				String text = coordinates(entry);
 				minecraft.keyboardHandler.setClipboard(text);
 				status = "Copied " + text + " (" + displayName(entry.id()) + ").";
+			}
+
+			void setDone(boolean done) {
+				status = StructureMapClient.setChecked(entry, done);
+				reload();
+				refresh();
 			}
 
 			void openChests() {

@@ -98,6 +98,62 @@ public final class Waypoints {
 		return removed;
 	}
 
+	/**
+	 * A structure was checked off (or back on): disables or deletes its waypoints, as the setting
+	 * says, or puts them back. Waypoints at any of the positions count (a god apple's can be at
+	 * the chest). Returns what was done, for a message, or null if nothing changed. Client thread.
+	 */
+	public static String checkedOff(Identifier id, List<BlockPos> positions, boolean done) {
+		if (!available()) {
+			return null;
+		}
+		List<Mark> marks = positions.stream().map(pos -> forStructure(id, pos)).toList();
+		String world = XaeroBridge.worldKey();
+		if (!done) {
+			// Undo whichever happened: switch disabled ones back on, put deleted ones back.
+			int enabled = XaeroBridge.setDisabled(marks, false);
+			List<String> lines = readLines(deletedFile());
+			List<String> kept = new ArrayList<>();
+			List<Mark> restore = new ArrayList<>();
+			for (String line : lines) {
+				Mark mark = decode(world, line);
+				if (mark != null && marks.stream().anyMatch(m -> m.x() == mark.x() && m.z() == mark.z() && m.name().equals(mark.name()))) {
+					restore.add(new Mark(mark.name(), mark.symbol(), mark.x(), mark.y(), mark.z(), mark.hasY(), id.hashCode()));
+				} else {
+					kept.add(line);
+				}
+			}
+			int restored = restore.isEmpty() ? 0 : add(restore).size();
+			writeLines(deletedFile(), kept);
+			return enabled > 0 ? "switched its waypoint back on" : restored > 0 ? "put its waypoint back" : null;
+		}
+		return switch (StructureMapSettings.checkedOff()) {
+			case KEEP -> null;
+			case DISABLE -> XaeroBridge.setDisabled(marks, true) > 0 ? "disabled its waypoint" : null;
+			case DELETE -> {
+				if (XaeroBridge.remove(marks) == 0) {
+					yield null;
+				}
+				// Remembered, so unchecking can put it back.
+				List<String> lines = readLines(deletedFile());
+				for (Mark mark : marks) {
+					lines.add(encode(world, mark));
+				}
+				writeLines(deletedFile(), lines);
+				yield "deleted its waypoint";
+			}
+		};
+	}
+
+	/** The structure's waypoint at this position: whether it's disabled, or null if there isn't one. For the game test. */
+	public static Boolean waypointDisabled(Identifier id, BlockPos pos) {
+		return XaeroBridge.disabled(forStructure(id, pos));
+	}
+
+	private static Path deletedFile() {
+		return FabricLoader.getInstance().getConfigDir().resolve("structuremap-deleted-waypoints.txt");
+	}
+
 	/** Gives Xaero's slime chunk overlay the seed. Returns true if it changed. Client thread. */
 	public static boolean shareSlimeChunkSeed(long seed) {
 		return available() && XaeroBridge.setSlimeChunkSeed(seed);
@@ -127,22 +183,30 @@ public final class Waypoints {
 	}
 
 	private static List<String> readLines() {
-		if (!Files.exists(file())) {
+		return readLines(file());
+	}
+
+	private static List<String> readLines(Path path) {
+		if (!Files.exists(path)) {
 			return new ArrayList<>();
 		}
 		try {
-			return new ArrayList<>(Files.readAllLines(file(), StandardCharsets.UTF_8));
+			return new ArrayList<>(Files.readAllLines(path, StandardCharsets.UTF_8));
 		} catch (IOException e) {
-			LOGGER.warn("Couldn't read {}", file(), e);
+			LOGGER.warn("Couldn't read {}", path, e);
 			return new ArrayList<>();
 		}
 	}
 
 	private static void writeLines(List<String> lines) {
+		writeLines(file(), lines);
+	}
+
+	private static void writeLines(Path path, List<String> lines) {
 		try {
-			Files.write(file(), lines, StandardCharsets.UTF_8);
+			Files.write(path, lines, StandardCharsets.UTF_8);
 		} catch (IOException e) {
-			LOGGER.warn("Couldn't write {}", file(), e);
+			LOGGER.warn("Couldn't write {}", path, e);
 		}
 	}
 }

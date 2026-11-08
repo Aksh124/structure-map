@@ -29,6 +29,9 @@ import structuremap.ChestContentsScreen;
 import structuremap.StructureHistory;
 import structuremap.StructureListScreen;
 import structuremap.StructureMapClient;
+import structuremap.StructureMapSettings;
+import structuremap.StructureMapSettingsScreen;
+import structuremap.Waypoints;
 import structuremap.StructureMapClient.ChestFind;
 import structuremap.StructureMapClient.LootFind;
 
@@ -92,6 +95,7 @@ public class GodAppleGameTest implements FabricClientGameTest {
 			context.takeScreenshot("structuremap-godapples");
 
 			structureList(context);
+			checkingOff(context);
 		}
 	}
 
@@ -161,6 +165,99 @@ public class GodAppleGameTest implements FabricClientGameTest {
 		return simulated.size();
 	}
 
+	/** Checking off: waypoints disabled or deleted as set, searches skip it, hiding, unchecking, and the chat commands. */
+	private static void checkingOff(ClientGameTestContext context) {
+		StructureHistory.Entry village = StructureHistory.entries(SEED).stream()
+			.filter(entry -> entry.id().equals("minecraft:village_plains")).findFirst().orElseThrow();
+		Identifier villageId = Identifier.parse(village.id());
+		BlockPos villagePos = village.pos();
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate waypoints add structure " + villagePos.getX() + " "
+			+ villagePos.getZ() + " " + village.id()));
+		context.waitTicks(5);
+		check(Boolean.FALSE.equals(context.computeOnClient(mc -> Waypoints.waypointDisabled(villageId, villagePos))), "no village waypoint to start with");
+
+		// The setting, from its own screen.
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate settings"));
+		waitUntil(context, 5, () -> net.minecraft.client.Minecraft.getInstance().gui.screen() instanceof StructureMapSettingsScreen,
+			() -> "settings didn't open");
+		context.runOnClient(mc -> {
+			((StructureMapSettingsScreen) mc.gui.screen()).choose(StructureMapSettings.CheckedOff.DISABLE);
+			mc.gui.screen().onClose();
+		});
+
+		// Check it off in the menu: disabled waypoint, and the next search finds a different village.
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate menu"));
+		waitUntil(context, 5, () -> net.minecraft.client.Minecraft.getInstance().gui.screen() instanceof StructureListScreen, () -> "menu didn't open");
+		context.waitTicks(2);
+		String status = context.computeOnClient(mc -> {
+			list().setDone(rowOf(village), true);
+			return list().status();
+		});
+		check(StructureHistory.isDone(SEED, "minecraft:overworld", village.id(), village.chunkX(), village.chunkZ()), "not checked off");
+		check(status.startsWith("Checked off the Village Plains"), "menu status: " + status);
+		check(Boolean.TRUE.equals(context.computeOnClient(mc -> Waypoints.waypointDisabled(villageId, villagePos))), "waypoint not disabled: " + status);
+		log("checked off in the menu: " + status);
+		context.takeScreenshot("structuremap-checked-off");
+
+		BlockPos origin = context.computeOnClient(mc -> mc.player.blockPosition());
+		StructureMapClient.Found next = StructureMapClient.locateStructure("minecraft:village_plains", Level.OVERWORLD, origin).join();
+		check(next.pos() != null && !next.pos().equals(villagePos), "search still found the checked-off village: " + next.pos());
+		log("searching again skips it: next village at " + next.pos() + " instead of " + villagePos);
+
+		List<StructureHistory.Entry> shown = context.computeOnClient(mc -> {
+			list().setHideDone(true);
+			return list().shownEntries();
+		});
+		check(shown.stream().noneMatch(StructureHistory.Entry::done), "hidden switch still shows checked-off rows");
+		context.runOnClient(mc -> list().setHideDone(false));
+
+		context.runOnClient(mc -> list().setDone(rowOf(village), false));
+		check(Boolean.FALSE.equals(context.computeOnClient(mc -> Waypoints.waypointDisabled(villageId, villagePos))), "unchecking didn't re-enable it");
+		log("hide switch works; unchecking switched the waypoint back on");
+
+		// Delete instead.
+		StructureMapSettings.setCheckedOff(StructureMapSettings.CheckedOff.DELETE);
+		context.runOnClient(mc -> list().setDone(rowOf(village), true));
+		check(context.computeOnClient(mc -> Waypoints.waypointDisabled(villageId, villagePos)) == null, "waypoint not deleted");
+		context.runOnClient(mc -> list().setDone(rowOf(village), false));
+		check(Boolean.FALSE.equals(context.computeOnClient(mc -> Waypoints.waypointDisabled(villageId, villagePos))), "unchecking didn't put it back");
+		context.runOnClient(mc -> mc.gui.screen().onClose());
+		StructureMapSettings.setCheckedOff(StructureMapSettings.CheckedOff.DISABLE);
+		log("delete setting: checking off deleted the waypoint, unchecking put it back");
+
+		// The chat buttons' commands.
+		StructureHistory.Entry stronghold = StructureHistory.entries(SEED).stream()
+			.filter(entry -> entry.id().equals("minecraft:stronghold")).findFirst().orElseThrow();
+		String done = "structurelocate done " + stronghold.pos().getX() + " " + stronghold.pos().getZ() + " minecraft:stronghold";
+		context.runOnClient(mc -> mc.player.connection.sendCommand(done));
+		context.waitTicks(2);
+		check(StructureHistory.isDone(SEED, "minecraft:overworld", "minecraft:stronghold", stronghold.chunkX(), stronghold.chunkZ()), "[Done] didn't check it off");
+		context.runOnClient(mc -> mc.player.connection.sendCommand(done.replace(" done ", " undone ")));
+		context.waitTicks(2);
+		check(!StructureHistory.isDone(SEED, "minecraft:overworld", "minecraft:stronghold", stronghold.chunkX(), stronghold.chunkZ()), "[Undo] didn't");
+		log("[Done] and [Undo] from chat work");
+
+		// The god apple search skips a checked-off city.
+		LootFind first = StructureMapClient.findLoot("minecraft:ancient_city", Items.ENCHANTED_GOLDEN_APPLE, Level.OVERWORLD, BlockPos.ZERO, 1, 300).join().getFirst();
+		context.runOnClient(mc -> mc.player.connection.sendCommand("structurelocate done " + first.structure().getX() + " " + first.structure().getZ()
+			+ " minecraft:ancient_city"));
+		context.waitTicks(2);
+		LootFind second = StructureMapClient.findLoot("minecraft:ancient_city", Items.ENCHANTED_GOLDEN_APPLE, Level.OVERWORLD, BlockPos.ZERO, 1, 300).join().getFirst();
+		check(!second.structure().equals(first.structure()), "god apple search still found the checked-off city");
+		log("god apple search skips the checked-off city at " + first.structure() + ", next is " + second.structure());
+		// Leave nothing checked off for the /locate comparison that runs next.
+		StructureHistory.clear(SEED);
+	}
+
+	private static int rowOf(StructureHistory.Entry entry) {
+		List<StructureHistory.Entry> rows = list().shownEntries();
+		for (int i = 0; i < rows.size(); i++) {
+			if (rows.get(i).id().equals(entry.id()) && rows.get(i).chunkX() == entry.chunkX() && rows.get(i).chunkZ() == entry.chunkZ()) {
+				return i;
+			}
+		}
+		throw new AssertionError("no row for " + entry);
+	}
 	/** The located structures menu: history from commands, tags, filters, sorting, copying and the chest view. */
 	private static void structureList(ClientGameTestContext context) {
 		StructureHistory.clear(SEED);

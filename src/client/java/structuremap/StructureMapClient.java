@@ -87,6 +87,7 @@ public final class StructureMapClient implements ClientModInitializer {
 
 	private static int ticks;
 	private static boolean openListNextTick;
+	private static boolean openSettingsNextTick;
 	private static final KeyMapping OPEN_LIST = new KeyMapping("key.structuremap.list", InputConstants.UNKNOWN.getValue(),
 		KeyMapping.Category.register(Identifier.fromNamespaceAndPath("structuremap", "keys")));
 
@@ -101,6 +102,10 @@ public final class StructureMapClient implements ClientModInitializer {
 			if (openListNextTick && client.player != null) {
 				openListNextTick = false;
 				client.gui.setScreen(new StructureListScreen(null));
+			}
+			if (openSettingsNextTick && client.player != null) {
+				openSettingsNextTick = false;
+				client.gui.setScreen(new StructureMapSettingsScreen(null));
 			}
 		});
 		if (Waypoints.available()) {
@@ -202,6 +207,18 @@ public final class StructureMapClient implements ClientModInitializer {
 				throw new IllegalStateException("This dimension isn't part of the default world preset.");
 			}
 			Pair<BlockPos, Holder<Structure>> result = Locator.nearestStructure(loaded, gen, targets, origin);
+			if (result != null && isDone(forSeed, dimension, result)) {
+				// That one is checked off: the nearest one that isn't.
+				List<Pair<BlockPos, Holder<Structure>>> next = new ArrayList<>();
+				Locator.visitNearest(loaded, gen, targets, origin, 500, start -> {
+					if (isDone(forSeed, dimension, start)) {
+						return false;
+					}
+					next.add(start);
+					return true;
+				});
+				result = next.isEmpty() ? null : next.getFirst();
+			}
 			return result == null ? new Found(null, null)
 				: new Found(result.getFirst(), result.getSecond().unwrapKey().map(ResourceKey::identifier).orElse(null));
 		}, WORKER);
@@ -221,15 +238,26 @@ public final class StructureMapClient implements ClientModInitializer {
 				throw new IllegalStateException("This dimension isn't part of the default world preset.");
 			}
 			List<Found> found = new ArrayList<>();
-			for (Pair<BlockPos, Holder<Structure>> result : Locator.nearestStructures(loaded, gen, targets, origin, count)) {
+			// Extra to make up for any that are checked off.
+			for (Pair<BlockPos, Holder<Structure>> result : Locator.nearestStructures(loaded, gen, targets, origin,
+				count + StructureHistory.doneCount(forSeed))) {
+				if (isDone(forSeed, dimension, result) || found.size() >= count) {
+					continue;
+				}
 				found.add(new Found(result.getFirst(), result.getSecond().unwrapKey().map(ResourceKey::identifier).orElse(null)));
 			}
 			return found;
 		}, WORKER);
 	}
 
-	/** A loot chest in a structure and what it holds when first opened. */
-	/** {@code certain} is false for ancient city chests whose loot can differ: see ChestSimulator.Chest. */
+	/** Whether this structure start has been checked off in the list, so searches skip it. */
+	private static boolean isDone(long forSeed, ResourceKey<Level> dimension, Pair<BlockPos, Holder<Structure>> start) {
+		String id = start.getSecond().unwrapKey().map(key -> key.identifier().toString()).orElse("");
+		return StructureHistory.isDone(forSeed, dimension.identifier().toString(), id, start.getFirst().getX() >> 4,
+			start.getFirst().getZ() >> 4);
+	}
+
+	/** A loot chest in a structure and what it holds when first opened. {@code certain} is false for ancient city chests whose loot can differ: see ChestSimulator.Chest. */
 	public record ChestFind(BlockPos pos, Identifier table, long seed, List<ItemStack> items, boolean certain) {}
 
 	/** A structure whose chests hold the item looked for. */
@@ -276,6 +304,9 @@ public final class StructureMapClient implements ClientModInitializer {
 			List<LootFind> found = new ArrayList<>();
 			// Closest first, checking chests as each is found, so a nearby find returns straight away.
 			Locator.visitNearest(loaded, gen, resolve(registry, name), origin, maxChecked, result -> {
+				if (isDone(forSeed, dimension, result)) {
+					return false;
+				}
 				List<ChestFind> withItem = new ArrayList<>();
 				int count = 0;
 				for (ChestFind chest : chestsWithLoot(loaded, gen, result.getSecond(), new ChunkPos(result.getFirst().getX() >> 4, result.getFirst().getZ() >> 4))) {
@@ -357,6 +388,18 @@ public final class StructureMapClient implements ClientModInitializer {
 						.suggests((context, builder) -> suggest(builder, Registries.STRUCTURE))
 						.executes(context -> addNearestWaypoints(context.getSource(), StringArgumentType.getString(context, "structure"),
 							IntegerArgumentType.getInteger(context, "count"))))))
+			.then(literal("done").then(argument("x", IntegerArgumentType.integer()).then(argument("z", IntegerArgumentType.integer())
+				.then(argument("id", StringArgumentType.greedyString())
+					.executes(context -> checkOff(context.getSource(), IntegerArgumentType.getInteger(context, "x"),
+						IntegerArgumentType.getInteger(context, "z"), StringArgumentType.getString(context, "id"), true))))))
+			.then(literal("undone").then(argument("x", IntegerArgumentType.integer()).then(argument("z", IntegerArgumentType.integer())
+				.then(argument("id", StringArgumentType.greedyString())
+					.executes(context -> checkOff(context.getSource(), IntegerArgumentType.getInteger(context, "x"),
+						IntegerArgumentType.getInteger(context, "z"), StringArgumentType.getString(context, "id"), false))))))
+			.then(literal("settings").executes(context -> {
+				openSettingsNextTick = true;
+				return Command.SINGLE_SUCCESS;
+			}))
 			.then(literal("menu").executes(context -> {
 				openListNextTick = true;
 				return Command.SINGLE_SUCCESS;
@@ -406,6 +449,57 @@ public final class StructureMapClient implements ClientModInitializer {
 	// The structure list
 
 	/** Adds a find to the list, and checks a pyramid's or ancient city's chests in the background. */
+	/** A [✓ Done] chat button that checks this structure off. */
+	private static Component doneButton(String id, BlockPos pos) {
+		String command = "/structurelocate done " + pos.getX() + " " + pos.getZ() + " " + id;
+		return Component.literal("[✓ Done]").withStyle(style -> style
+			.withColor(ChatFormatting.GREEN)
+			.withClickEvent(new ClickEvent.RunCommand(command))
+			.withHoverEvent(new HoverEvent.ShowText(Component.literal("Check it off: searches will skip it from now on"))));
+	}
+
+	/** /structurelocate done and undone: check the structure starting at this position off, or back on. */
+	private static int checkOff(FabricClientCommandSource source, int x, int z, String id, boolean done) {
+		Minecraft mc = Minecraft.getInstance();
+		Long forSeed = seed;
+		if (forSeed == null || mc.level == null) {
+			source.sendError(Component.literal(noSeedMessage()));
+			return 0;
+		}
+		StructureHistory.Entry entry = StructureHistory.add(forSeed, mc.level.dimension().identifier().toString(), id, new BlockPos(x, 0, z), false);
+		String result = setChecked(entry, done);
+		MutableComponent text = Component.literal(result);
+		if (done) {
+			String undo = "/structurelocate undone " + x + " " + z + " " + id;
+			text.append(" ").append(Component.literal("[Undo]").withStyle(style -> style
+				.withColor(ChatFormatting.YELLOW)
+				.withClickEvent(new ClickEvent.RunCommand(undo))));
+		}
+		message(text);
+		return Command.SINGLE_SUCCESS;
+	}
+
+	/**
+	 * Checks a structure off or back on: searches skip checked-off ones, and its Xaero waypoint is
+	 * disabled, deleted or left as the setting says. Returns a message to show. Client thread.
+	 */
+	public static String setChecked(StructureHistory.Entry entry, boolean done) {
+		StructureHistory.setDone(entry, done);
+		String waypoint = null;
+		try {
+			List<BlockPos> positions = new ArrayList<>(List.of(entry.pos()));
+			if (entry.chest() != null) {
+				positions.add(entry.chest());
+			}
+			waypoint = Waypoints.checkedOff(Identifier.parse(entry.id()), positions, done);
+		} catch (RuntimeException e) {
+			LOGGER.warn("Couldn't update the waypoint for {}", entry.id(), e);
+		}
+		String name = StructureListScreen.displayName(entry.id());
+		return (done ? "Checked off the " + name + ". Searches will skip it" : "Unchecked the " + name + ". Searches will find it again")
+			+ (waypoint == null ? "." : ", and " + waypoint + ".");
+	}
+
 	static void record(String id, BlockPos pos, ResourceKey<Level> dimension) {
 		Long forSeed = seed;
 		if (forSeed == null) {
@@ -491,6 +585,9 @@ public final class StructureMapClient implements ClientModInitializer {
 						.withClickEvent(new ClickEvent.RunCommand(command))
 						.withHoverEvent(new HoverEvent.ShowText(Component.literal("Add a waypoint in Xaero's Minimap")))));
 				}
+				if (find.id() != null) {
+					line.append(" ").append(doneButton(find.id().toString(), find.structure()));
+				}
 				message(line);
 			}
 			message(Component.literal(String.format(Locale.ROOT, "Checked in %.1fs. Chests someone has already opened won't match.", seconds))
@@ -546,6 +643,9 @@ public final class StructureMapClient implements ClientModInitializer {
 					.withColor(ChatFormatting.YELLOW)
 					.withClickEvent(new ClickEvent.RunCommand(command))
 					.withHoverEvent(new HoverEvent.ShowText(Component.literal("Add a waypoint in Xaero's Minimap")))));
+			}
+			if (!biome && found.id() != null) {
+				line.append(" ").append(doneButton(found.id().toString(), pos));
 			}
 			message(line);
 		}));

@@ -85,6 +85,31 @@ final class XaeroBridge {
 		return removed;
 	}
 
+	/** Disables or re-enables these marks in every set of the current world. Returns how many it changed. */
+	static int setDisabled(Collection<Mark> marks, boolean disabled) {
+		MinimapSession session = session();
+		MinimapWorld world = session.getWorldManager().getCurrentWorld();
+		int changed = 0;
+		for (Mark mark : marks) {
+			for (WaypointSet set : world.getIterableWaypointSets()) {
+				Waypoint waypoint = find(set, mark);
+				if (waypoint != null && waypoint.isDisabled() != disabled) {
+					waypoint.setDisabled(disabled);
+					changed++;
+				}
+			}
+		}
+		if (changed > 0) {
+			save(session, world);
+		}
+		return changed;
+	}
+	/** Whether this mark's waypoint is disabled, or null if there isn't one. For the game test. */
+	static Boolean disabled(Mark mark) {
+		Waypoint waypoint = find(session().getWorldManager().getCurrentWorld(), mark);
+		return waypoint == null ? null : waypoint.isDisabled();
+	}
+
 	/** Sets the seed for Xaero's slime chunk overlay if you're in the Overworld and it differs. */
 	static boolean setSlimeChunkSeed(long seed) {
 		MinimapSession session = BuiltInHudModules.MINIMAP.getCurrentSession();
